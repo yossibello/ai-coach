@@ -1,0 +1,103 @@
+version: "3.9"
+
+services:
+  postgres:
+    image: timescale/timescaledb:latest-pg15
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-aicoach}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-aicoach_secret}
+      POSTGRES_DB: ${POSTGRES_DB:-aicoach}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U aicoach"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    ports:
+      - "8000:8000"
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-aicoach}:${POSTGRES_PASSWORD:-aicoach_secret}@postgres:5432/${POSTGRES_DB:-aicoach}
+      REDIS_URL: redis://redis:6379
+      SECRET_KEY: ${SECRET_KEY:-changeme_in_production_use_32_char_random}
+      STRAVA_CLIENT_ID: ${STRAVA_CLIENT_ID}
+      STRAVA_CLIENT_SECRET: ${STRAVA_CLIENT_SECRET}
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
+      ML_MODEL_PATH: /app/models/cycling_coach.pt
+      ENVIRONMENT: ${ENVIRONMENT:-development}
+    volumes:
+      - ./backend:/app
+      - model_storage:/app/models
+      - file_storage:/app/uploads
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+
+  worker:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-aicoach}:${POSTGRES_PASSWORD:-aicoach_secret}@postgres:5432/${POSTGRES_DB:-aicoach}
+      REDIS_URL: redis://redis:6379
+      SECRET_KEY: ${SECRET_KEY:-changeme_in_production_use_32_char_random}
+      STRAVA_CLIENT_ID: ${STRAVA_CLIENT_ID}
+      STRAVA_CLIENT_SECRET: ${STRAVA_CLIENT_SECRET}
+      ML_MODEL_PATH: /app/models/cycling_coach.pt
+    volumes:
+      - ./backend:/app
+      - model_storage:/app/models
+      - file_storage:/app/uploads
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    command: celery -A app.worker worker --loglevel=info --concurrency=4
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    ports:
+      - "3000:3000"
+    environment:
+      NEXT_PUBLIC_API_URL: http://localhost:8000
+      NEXTAUTH_URL: http://localhost:3000
+      NEXTAUTH_SECRET: ${NEXTAUTH_SECRET:-changeme_nextauth_secret}
+      NEXT_PUBLIC_STRAVA_CLIENT_ID: ${STRAVA_CLIENT_ID}
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+      - /app/.next
+    depends_on:
+      - backend
+    command: npm run dev
+
+volumes:
+  postgres_data:
+  redis_data:
+  model_storage:
+  file_storage:

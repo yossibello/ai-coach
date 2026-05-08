@@ -1,0 +1,50 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@import url("https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap");
+
+:root {
+  --font-inter: "Inter", sans-serif;
+  --font-mono: ui-monospace, "Cascadia Code", "Source Code Pro", monospace;
+}
+
+* {
+  box-sizing: border-box;
+  padding: 0;
+  margin: 0;
+}
+
+html {
+  scroll-behavior: smooth;
+}
+
+body {
+  background: #0f1117;
+  color: #e2e8f0;
+  font-family: var(--font-inter);
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Custom scrollbar */
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: #0f1117; }
+::-webkit-scrollbar-thumb { background: #1e2737; border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: #2d3b52; }
+
+/* Recharts tooltip */
+.recharts-tooltip-wrapper .recharts-default-tooltip {
+  background: #161b27 !important;
+  border: 1px solid #1e2737 !important;
+  border-radius: 8px !important;
+  color: #e2e8f0 !important;
+}
+
+/* Zone color utilities */
+.zone-1 { color: #60a5fa; }  /* Recovery  - blue   */
+.zone-2 { color: #4ade80; }  /* Endurance - green  */
+.zone-3 { color: #facc15; }  /* Tempo     - yellow */
+.zone-4 { color: #fb923c; }  /* Threshold - orange */
+.zone-5 { color: #f87171; }  /* VO2max    - red    */
+.zone-6 { color: #c084fc; }  /* Anaerobic - purple */
+.zone-7 { color: #f9a8d4; }  /* Neuromuscular - pink */

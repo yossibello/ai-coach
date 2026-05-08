@@ -1,0 +1,56 @@
+# ── Python ────────────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+venv/
+env/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+
+# ── Node / Next.js ────────────────────────────────────────────────────────────
+node_modules/
+.next/
+out/
+build/
+dist/
+*.tsbuildinfo
+.npm/
+.yarn/
+yarn-error.log
+npm-debug.log*
+
+# ── Env / secrets ─────────────────────────────────────────────────────────────
+.env
+.env.local
+.env.*.local
+*.pem
+*.key
+
+# ── IDE / OS ──────────────────────────────────────────────────────────────────
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# ── Docker / Postgres data ────────────────────────────────────────────────────
+postgres_data/
+redis_data/
+
+# ── ML data (regenerate from seed; too big for git) ───────────────────────────
+ml/data/*.parquet
+ml/data/*.csv
+
+# ── Model checkpoints ─────────────────────────────────────────────────────────
+# Keep production model in git so frontend/backend can pull it.
+# Ignore test/smoke checkpoints.
+backend/models/*.pt
+!backend/models/cycling_coach.pt
+
+# ── Logs ──────────────────────────────────────────────────────────────────────
+*.log
+logs/
