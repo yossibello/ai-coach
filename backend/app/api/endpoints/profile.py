@@ -28,6 +28,10 @@ class ProfileOut(BaseModel):
     goal_event_date: Optional[str]
     goal_event_name: Optional[str]
     training_days_per_week: Optional[int]
+    diet: Optional[str] = None
+    climate: Optional[str] = None
+    event_type: Optional[str] = None
+    recent_illness_count_3m: Optional[int] = None
 
 
 class ProfileUpdate(BaseModel):
@@ -44,6 +48,10 @@ class ProfileUpdate(BaseModel):
     goal_event_date: Optional[str] = None
     goal_event_name: Optional[str] = None
     training_days_per_week: Optional[int] = None
+    diet: Optional[str] = None
+    climate: Optional[str] = None
+    event_type: Optional[str] = None
+    recent_illness_count_3m: Optional[int] = None
 
 
 @router.get("", response_model=ProfileOut)
@@ -105,4 +113,8 @@ def _profile_out(p: AthleteProfile) -> ProfileOut:
         goal_event_date=p.goal_event_date.isoformat() if p.goal_event_date else None,
         goal_event_name=p.goal_event_name,
         training_days_per_week=p.training_days_per_week,
+        diet=p.diet,
+        climate=p.climate,
+        event_type=p.event_type,
+        recent_illness_count_3m=p.recent_illness_count_3m,
     )

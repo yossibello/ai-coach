@@ -26,6 +26,10 @@ export interface AthleteProfile {
   goal_event_date?: string;
   goal_event_name?: string;
   training_days_per_week: number;
+  diet?: "omnivore" | "vegetarian" | "vegan" | "pescatarian" | "keto";
+  climate?: "temperate" | "hot_humid" | "hot_dry" | "cold" | "northern_winter" | "indoor_only";
+  event_type?: "long_road" | "crit" | "tt" | "stage_race" | "gran_fondo";
+  recent_illness_count_3m?: number;
 }
 
 export type GoalType =

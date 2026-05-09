@@ -341,11 +341,12 @@ async def _generate_and_store_stack(
     )
     profile = pres.scalar_one_or_none()
     profile_dict = {
-        "sex":   profile.sex if profile else None,
-        "age":   profile.age if profile else None,
-        "diet":  None,        # TODO: add to AthleteProfile
-        "climate": None,      # TODO: add to AthleteProfile
+        "sex":     profile.sex if profile else None,
+        "age":     profile.age if profile else None,
+        "diet":    profile.diet if profile else None,
+        "climate": profile.climate if profile else None,
         "training_days_per_week": profile.training_days_per_week if profile else None,
+        "recent_illness_count_3m": profile.recent_illness_count_3m if profile else 0,
     }
 
     # Latest fitness metric
@@ -398,7 +399,7 @@ async def _generate_and_store_stack(
         ctl=ctl,
         weekly_tss=weekly_tss,
         recent_avg_temp_c=recent_avg_temp,
-        upcoming_event_type=None,             # TODO: add event_type to profile
+        upcoming_event_type=(profile.event_type if profile else None),
         days_to_event=days_to_event,
         workout_focus=None,                   # could pull from latest recommendation
         blood_test=blood_test,

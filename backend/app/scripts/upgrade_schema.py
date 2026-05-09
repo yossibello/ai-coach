@@ -29,8 +29,11 @@ STATEMENTS = [
     "CREATE INDEX IF NOT EXISTS ix_activities_review_status ON activities(review_status)",
     # Users ───────────────────────────────────────────────────────────────────
     "ALTER TABLE users ADD COLUMN IF NOT EXISTS allow_for_training BOOLEAN     NOT NULL DEFAULT TRUE",
-    "ALTER TABLE users ADD COLUMN IF NOT EXISTS model_version      VARCHAR(50)",
-    # Nutrition ───────────────────────────────────────────────────────────────
+    "ALTER TABLE users ADD COLUMN IF NOT EXISTS model_version      VARCHAR(50)",    # Athlete profile nutrition context ──────────────────────────────────────────────
+    "ALTER TABLE athlete_profiles ADD COLUMN IF NOT EXISTS diet                    VARCHAR(20)",
+    "ALTER TABLE athlete_profiles ADD COLUMN IF NOT EXISTS climate                 VARCHAR(30)",
+    "ALTER TABLE athlete_profiles ADD COLUMN IF NOT EXISTS event_type              VARCHAR(30)",
+    "ALTER TABLE athlete_profiles ADD COLUMN IF NOT EXISTS recent_illness_count_3m INTEGER",    # Nutrition ───────────────────────────────────────────────────────────────
     """
     CREATE TABLE IF NOT EXISTS blood_tests (
         id                UUID PRIMARY KEY,

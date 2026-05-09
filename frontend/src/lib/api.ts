@@ -139,4 +139,124 @@ export const profileAPI = {
     api.put<AthleteProfile>("/api/v1/profile", data).then((r) => r.data),
 };
 
+// ─── Nutrition / Supplements ─────────────────────────────────────────────────
+
+export interface BloodMarkerValue {
+  value: number;
+  unit: string;
+  ref_low: number;
+  ref_high: number;
+  status:
+    | "critical_low" | "low" | "suboptimal" | "optimal" | "high" | "critical_high" | "unknown";
+  label: string;
+  category: string;
+  _confidence?: number;
+}
+
+export interface BloodTest {
+  id: string;
+  test_date: string;
+  lab_name: string | null;
+  source: "pdf" | "manual" | "api";
+  parser_version: string | null;
+  parser_confidence: number | null;
+  markers: Record<string, BloodMarkerValue>;
+  notes: string | null;
+}
+
+export interface MarkerTimeSeries {
+  marker_key: string;
+  label: string;
+  unit: string;
+  points: Array<{
+    test_date: string;
+    value: number;
+    status: string;
+    ref_low: number;
+    ref_high: number;
+  }>;
+}
+
+export interface SupplementItem {
+  supplement_key: string;
+  label: string;
+  category: string;
+  evidence_grade: "A" | "B" | "C" | "D";
+  dose: number;
+  dose_unit: string;
+  frequency: string;
+  timing: string;
+  duration: string;
+  rationale: string;
+  citations: string[];
+  warnings: string[];
+  contraindications: string[];
+  score: number;
+  triggered_by: string[];
+}
+
+export interface SupplementWarning {
+  warning_key: string;
+  applies_to: string[];
+  message: string;
+  citations: string[];
+}
+
+export interface SupplementStackPayload {
+  stack: SupplementItem[];
+  depletion_signals: Record<string, number>;
+  warnings: SupplementWarning[];
+  based_on_blood_test_id: string | null;
+  has_blood_test: boolean;
+  engine_version: string;
+  is_cold_start: boolean;
+  disclaimer: string;
+}
+
+export interface SupplementStack {
+  id: string;
+  generated_at: string;
+  engine_version: string;
+  is_cold_start: boolean;
+  based_on_blood_test_id: string | null;
+  payload: SupplementStackPayload;
+}
+
+export const nutritionAPI = {
+  uploadBloodTestPDF: (file: File, notes?: string) => {
+    const form = new FormData();
+    form.append("file", file);
+    if (notes) form.append("notes", notes);
+    return api.post<BloodTest>("/api/v1/nutrition/blood-tests", form, {
+      headers: { "Content-Type": "multipart/form-data" },
+    }).then((r) => r.data);
+  },
+
+  uploadBloodTestManual: (body: {
+    test_date: string;
+    lab_name?: string;
+    notes?: string;
+    markers: Array<{ marker_key: string; value: number; unit?: string }>;
+  }) =>
+    api.post<BloodTest>("/api/v1/nutrition/blood-tests/manual", body).then((r) => r.data),
+
+  listBloodTests: () =>
+    api.get<BloodTest[]>("/api/v1/nutrition/blood-tests").then((r) => r.data),
+
+  getBloodTest: (id: string) =>
+    api.get<BloodTest>(`/api/v1/nutrition/blood-tests/${id}`).then((r) => r.data),
+
+  deleteBloodTest: (id: string) =>
+    api.delete(`/api/v1/nutrition/blood-tests/${id}`).then((r) => r.data),
+
+  getMarkerSeries: (key: string) =>
+    api.get<MarkerTimeSeries>(`/api/v1/nutrition/markers/${key}`).then((r) => r.data),
+
+  getSupplements: () =>
+    api.get<SupplementStack>("/api/v1/nutrition/supplements").then((r) => r.data),
+
+  refreshSupplements: () =>
+    api.post<SupplementStack>("/api/v1/nutrition/supplements/refresh").then((r) => r.data),
+};
+
 export default api;

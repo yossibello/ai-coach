@@ -505,11 +505,12 @@ async def _supplement_stack_for_user(
     blood_test = ({"id": bt.id, "markers": bt.markers} if bt else None)
 
     profile_dict = {
-        "sex":   profile.sex if profile else None,
-        "age":   profile.age if profile else None,
-        "diet":  None,
-        "climate": None,
+        "sex":     profile.sex if profile else None,
+        "age":     profile.age if profile else None,
+        "diet":    profile.diet if profile else None,
+        "climate": profile.climate if profile else None,
         "training_days_per_week": profile.training_days_per_week if profile else None,
+        "recent_illness_count_3m": profile.recent_illness_count_3m if profile else 0,
     }
 
     return recommend_supplements(
@@ -518,7 +519,7 @@ async def _supplement_stack_for_user(
         ctl=ctl,
         weekly_tss=weekly_tss,
         recent_avg_temp_c=recent_avg_temp,
-        upcoming_event_type=None,
+        upcoming_event_type=(profile.event_type if profile else None),
         days_to_event=days_to_event,
         workout_focus=workout_focus,
         blood_test=blood_test,

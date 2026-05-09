@@ -85,6 +85,16 @@ class AthleteProfile(Base):
     goal_event_name: Mapped[str | None] = mapped_column(String(200), nullable=True)
     training_days_per_week: Mapped[int | None] = mapped_column(nullable=True)
 
+    # ── Nutrition / supplement engine context ────────────────────────────────
+    # 'omnivore' | 'vegetarian' | 'vegan' | 'pescatarian' | 'keto' | None
+    diet: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    # 'temperate' | 'hot_humid' | 'hot_dry' | 'cold' | 'northern_winter' | 'indoor_only' | None
+    climate: Mapped[str | None] = mapped_column(String(30), nullable=True)
+    # Free-form event type for the *next* A-event: 'long_road' | 'crit' | 'tt' | 'stage_race' | 'gran_fondo' | None
+    event_type: Mapped[str | None] = mapped_column(String(30), nullable=True)
+    # Self-reported illness episodes (URTI, GI, etc.) in last 3 months — RED-S / immunity proxy.
+    recent_illness_count_3m: Mapped[int | None] = mapped_column(nullable=True)
+
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
