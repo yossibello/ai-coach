@@ -18,10 +18,21 @@ from app.models.recommendation import Recommendation, FitnessMetric
 from app.ml.cold_start import build_cold_start_recommendation
 from app.ml.features import encode_activity, encode_profile
 from app.ml.model import CyclingTransformer, INPUT_DIM, ACTIVITY_DIM, PROFILE_DIM
+from app.ml.norm import encode_profile_row
 from app.core.config import settings
 
 COLD_START_THRESHOLD = 50   # activities required before using transformer
 MODEL_SEQ_LEN = 90          # last N activities fed to transformer
+
+# Phase 1 multi-horizon: same model, called 3 times with different days_to_event
+# inputs. The transformer was trained on synthetic athletes with varying event
+# timelines, so this elicits (weakly) different recommendations per horizon.
+# Phase 1.5 / B will add explicit horizon-conditioning + dedicated heads.
+HORIZON_DAYS = {
+    "short":  7,    # "what gives me the biggest 1-week gain?"
+    "medium": 28,   # "what's optimal for a 4-week build?"
+    "event":  None, # uses the user's actual goal_event_date (or 90 if none set)
+}
 
 WORKOUT_TYPE_NAMES = [
     "recovery", "easy", "endurance", "tempo", "sweetspot",
@@ -113,6 +124,29 @@ async def generate_recommendation(user: User, db: AsyncSession) -> Recommendatio
     )
 
 
+def _encode_profile_with_horizon(
+    profile: AthleteProfile | None, horizon_override_days: int | None
+) -> np.ndarray:
+    """Encode profile, optionally overriding `days_to_event` for multi-horizon probing."""
+    if horizon_override_days is None:
+        return encode_profile(profile, profile.ftp if profile and profile.ftp else 200)
+
+    p = profile
+    raw = {
+        "age":                       p.age if p else None,
+        "weight_kg":                 p.weight_kg if p else None,
+        "height_cm":                 p.height_cm if p else None,
+        "sex":                       p.sex if p else None,
+        "ftp":                       (p.ftp if p and p.ftp else 200),
+        "athlete_max_hr":            p.max_hr if p else None,
+        "resting_hr":                p.resting_hr if p else None,
+        "cycling_experience_years":  p.cycling_experience_years if p else None,
+        "primary_goal":              p.primary_goal if p else None,
+        "days_to_event":             max(0, int(horizon_override_days)),
+    }
+    return encode_profile_row(raw)
+
+
 def _transformer_recommendation(
     model: CyclingTransformer,
     activities: list[Activity],
@@ -120,10 +154,16 @@ def _transformer_recommendation(
     ctl: float,
     atl: float,
     tsb: float,
+    horizon_override_days: int | None = None,
 ) -> dict:
-    """Run the transformer and convert outputs to recommendation payload."""
+    """Run the transformer and convert outputs to recommendation payload.
+
+    If `horizon_override_days` is provided, it replaces `days_to_event` in the
+    profile vector — letting us probe the same model under different planning
+    horizons without retraining (Phase-1 multi-horizon trick).
+    """
     # Encode activity sequence
-    profile_vec = encode_profile(profile, profile.ftp if profile and profile.ftp else 200)
+    profile_vec = _encode_profile_with_horizon(profile, horizon_override_days)
 
     seq_features = []
     day_indices = []
@@ -299,3 +339,121 @@ def _zone_comment(pct_ftp: float) -> str:
     if pct_ftp < 105: return "Zone 4 — threshold."
     if pct_ftp < 120: return "Zone 5 — VO2max territory."
     return "Zone 6+ — anaerobic/neuromuscular."
+
+
+# ── Multi-horizon recommendation (Phase-1 / Option A) ─────────────────────────
+async def generate_multi_horizon_recommendation(
+    user: User, db: AsyncSession
+) -> dict:
+    """
+    Returns 3 alternative "next workout" recommendations, one per planning horizon:
+
+      • short  — 7-day FTP-gain horizon  ("what gives me the biggest bump this week?")
+      • medium — 28-day build horizon    ("what's the optimal 4-week move?")
+      • event  — actual goal-event date  ("what should I do today to peak on race day?")
+
+    Phase 1 implementation: probes the SAME model 3 times with different
+    `days_to_event` inputs. The synthetic training data covered varying event
+    timelines, so this elicits (weakly) different answers per horizon.
+    Phase 1.5/B will add explicit horizon-conditioning + dedicated heads.
+    """
+    # Load profile, recent activities, fitness — same context as the standard rec.
+    profile_result = await db.execute(
+        sa_select(AthleteProfile).where(AthleteProfile.user_id == user.id)
+    )
+    profile = profile_result.scalar_one_or_none()
+
+    act_result = await db.execute(
+        sa_select(Activity)
+        .where(
+            Activity.user_id == user.id,
+            Activity.review_status == "confirmed",
+        )
+        .order_by(desc(Activity.date))
+        .limit(MODEL_SEQ_LEN)
+    )
+    activities: list[Activity] = list(reversed(act_result.scalars().all()))
+
+    metric_result = await db.execute(
+        sa_select(FitnessMetric)
+        .where(FitnessMetric.user_id == user.id)
+        .order_by(desc(FitnessMetric.date))
+        .limit(1)
+    )
+    latest_metric = metric_result.scalar_one_or_none()
+    ctl = latest_metric.ctl if latest_metric else 0.0
+    atl = latest_metric.atl if latest_metric else 0.0
+    tsb = latest_metric.tsb if latest_metric else 0.0
+
+    count_result = await db.execute(
+        sa_select(func.count()).select_from(Activity).where(Activity.user_id == user.id)
+    )
+    total_activities = count_result.scalar_one()
+
+    model = _load_model()
+
+    # If we don't have a model or enough history, fall back to a single
+    # cold-start rec wrapped under the 'event' horizon.
+    if total_activities < COLD_START_THRESHOLD or model is None:
+        recent_types = [a.workout_type for a in activities[-7:] if a.workout_type]
+        cs = build_cold_start_recommendation(
+            profile, ctl, atl, tsb, recent_types, total_activities
+        )
+        cs["horizon"] = "event"
+        return {
+            "horizons":       {"event": cs},
+            "is_cold_start":  True,
+            "model_version":  cs.get("model_version", "cold_start_v1"),
+            "active_horizon": "event",
+        }
+
+    # Compute the user's true days-to-event (used for the 'event' horizon).
+    if profile and profile.goal_event_date:
+        true_dte = max(
+            0,
+            (profile.goal_event_date.replace(tzinfo=timezone.utc) - datetime.now(timezone.utc)).days,
+        )
+    else:
+        true_dte = 90  # sensible default if user has no event set
+
+    horizons_to_run = {
+        "short":  HORIZON_DAYS["short"],
+        "medium": HORIZON_DAYS["medium"],
+        "event":  true_dte,
+    }
+
+    out: dict[str, dict] = {}
+    for label, dte in horizons_to_run.items():
+        payload = _transformer_recommendation(
+            model, activities, profile, ctl, atl, tsb,
+            horizon_override_days=dte,
+        )
+        payload["horizon"]              = label
+        payload["horizon_days"]         = dte
+        payload["horizon_label"]        = _horizon_label(label, dte)
+        out[label] = payload
+
+    # Pick the active horizon: prefer 'event' if user has one set, else 'medium'.
+    active = "event" if (profile and profile.goal_event_date) else "medium"
+
+    return {
+        "horizons":       out,
+        "is_cold_start":  False,
+        "model_version":  out["medium"]["model_version"],
+        "active_horizon": active,
+    }
+
+
+def _horizon_label(label: str, days: int) -> str:
+    if label == "short":
+        return f"Max FTP gain in next {days} days"
+    if label == "medium":
+        return f"Best for {days}-day build"
+    if label == "event":
+        if days <= 0:
+            return "Event today — race-day prep"
+        if days <= 14:
+            return f"Peak for event in {days} days (taper window)"
+        return f"Best path to peak on event day ({days} days out)"
+    return label
+

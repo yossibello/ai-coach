@@ -8,7 +8,7 @@ from app.core.database import get_db
 from app.core.deps import get_current_user
 from app.models.user import User
 from app.models.recommendation import Recommendation
-from app.ml.inference import generate_recommendation
+from app.ml.inference import generate_recommendation, generate_multi_horizon_recommendation
 
 router = APIRouter()
 
@@ -62,6 +62,34 @@ async def refresh_recommendation(
     db.add(rec)
     await db.flush()
     return _rec_out(rec)
+
+
+# ── Multi-horizon: 3 alternative recommendations side-by-side ────────────────
+class MultiHorizonOut(BaseModel):
+    """
+    Three alternative "next workout" suggestions, one per planning horizon:
+      • short  — best for 7-day FTP gain
+      • medium — best for 28-day build
+      • event  — best path to peak on the user's goal-event date
+    Each horizon's payload mirrors the standard RecommendationOut shape.
+    """
+    is_cold_start:  bool
+    model_version:  str
+    active_horizon: str
+    horizons:       dict[str, Any]
+
+
+@router.get("/recommendation/multi-horizon", response_model=MultiHorizonOut)
+async def get_multi_horizon_recommendation(
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Returns 3 alternative recommendations side-by-side so the user can pick
+    based on their current priority (immediate gain vs long-term peak).
+    Always fresh — does not use the 6h cache.
+    """
+    return await generate_multi_horizon_recommendation(current_user, db)
 
 
 @router.get("/analyze/{activity_id}")
