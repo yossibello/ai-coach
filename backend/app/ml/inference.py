@@ -61,10 +61,14 @@ async def generate_recommendation(user: User, db: AsyncSession) -> Recommendatio
     )
     profile = profile_result.scalar_one_or_none()
 
-    # Load recent activities
+    # Load recent activities — exclude quarantined/rejected junk so the model
+    # context is clean. (See app.ml.quality / metrics_service._score_and_tag.)
     act_result = await db.execute(
         sa_select(Activity)
-        .where(Activity.user_id == user.id)
+        .where(
+            Activity.user_id == user.id,
+            Activity.review_status == "confirmed",
+        )
         .order_by(desc(Activity.date))
         .limit(MODEL_SEQ_LEN)
     )

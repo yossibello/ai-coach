@@ -86,7 +86,7 @@ async def sync_strava_history(
 ) -> None:
     """Fetch all Strava cycling activities and upsert into DB."""
     from sqlalchemy import select as sa_select
-    from app.services.metrics_service import compute_activity_metrics
+    from app.services.metrics_service import compute_activity_metrics, _score_and_tag
 
     token = await _refresh_token_if_needed(user, db)
     headers = {"Authorization": f"Bearer {token}"}
@@ -136,6 +136,7 @@ async def sync_strava_history(
 
         activity = _strava_to_activity(sa, user.id)
         compute_activity_metrics(activity, user)
+        _score_and_tag(activity, user)
         db.add(activity)
 
     await db.flush()

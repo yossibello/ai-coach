@@ -12,7 +12,7 @@ from app.core.config import settings
 from app.models.user import User
 from app.models.activity import Activity
 from app.services.file_parser import parse_activity_file
-from app.services.metrics_service import compute_activity_metrics
+from app.services.metrics_service import compute_activity_metrics, _score_and_tag
 
 router = APIRouter()
 
@@ -122,6 +122,7 @@ async def upload_activity(
 
     activity = Activity(user_id=current_user.id, source=ext.lstrip("."), **parsed)
     compute_activity_metrics(activity, current_user)
+    _score_and_tag(activity, current_user)
     db.add(activity)
     await db.flush()
 

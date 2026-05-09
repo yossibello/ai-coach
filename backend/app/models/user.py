@@ -28,6 +28,15 @@ class User(Base):
     garmin_access_token: Mapped[str | None] = mapped_column(String, nullable=True)
     garmin_refresh_token: Mapped[str | None] = mapped_column(String, nullable=True)
 
+    # ── ML / training participation ───────────────────────────────────────────
+    # User consent: may we use their (anonymized) rides to retrain the community model?
+    allow_for_training: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=True, server_default="true"
+    )
+    # Which model version is currently serving this user's recommendations.
+    # 'synthetic_v1', 'community_v2', etc. NULL = use latest active.
+    model_version: Mapped[str | None] = mapped_column(String(50), nullable=True)
+
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )

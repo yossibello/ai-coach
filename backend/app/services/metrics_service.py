@@ -14,6 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.activity import Activity
 from app.models.user import User, AthleteProfile
 from app.models.recommendation import FitnessMetric
+from app.ml.quality import score_activity
 
 # EMA constants
 CTL_DAYS = 42  # Chronic Training Load (fitness)
@@ -79,6 +80,38 @@ def _get_ftp(user: User | None) -> int | None:
     if profile and profile.ftp:
         return profile.ftp
     return 200  # fallback
+
+
+def _score_and_tag(activity: Activity, user: User | None) -> None:
+    """
+    Apply rule-based quality scoring to a freshly-ingested activity.
+
+    Sets activity.quality_score, activity.quality_reasons, activity.review_status.
+    Auto-quarantines obviously bad rides; everything else stays 'confirmed'.
+    Phase-2 outlier detection (vs the user's own history) is added separately.
+    """
+    profile = getattr(user, "profile", None) if user else None
+    score, reasons = score_activity(
+        {
+            "duration_seconds":  activity.duration_seconds,
+            "distance_meters":   activity.distance_meters,
+            "avg_power":         activity.avg_power,
+            "max_power":         activity.max_power,
+            "normalized_power":  activity.normalized_power,
+            "intensity_factor":  activity.intensity_factor,
+            "tss":               activity.tss,
+            "avg_hr":            activity.avg_hr,
+            "max_hr":            activity.max_hr,
+            "avg_cadence":       activity.avg_cadence,
+            "trainer":           activity.trainer,
+            "time_in_zones":     activity.time_in_zones,
+        },
+        profile_max_hr=getattr(profile, "max_hr", None),
+        profile_ftp=getattr(profile, "ftp", None),
+    )
+    activity.quality_score   = score
+    activity.quality_reasons = reasons or None
+    activity.review_status   = "quarantined" if score == "rejected" else "confirmed"
 
 
 def _classify_workout(if_: float, duration_s: int) -> str:

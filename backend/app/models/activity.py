@@ -59,6 +59,20 @@ class Activity(Base):
     kudos_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
     trainer: Mapped[bool | None] = mapped_column(nullable=True)
 
+    # ── Data quality (Phase 1: rule-based; Phase 2+: feeds community retraining) ──
+    # quality_score: 'high' | 'medium' | 'low' | 'rejected'
+    quality_score: Mapped[str | None] = mapped_column(String(20), nullable=True, index=True)
+    # JSON list of reason codes, e.g. ["missing_power", "hr_too_high"]
+    quality_reasons: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    # 'pending' | 'confirmed' | 'quarantined' | 'deleted'
+    review_status: Mapped[str] = mapped_column(
+        String(20), nullable=False, default="confirmed", server_default="confirmed", index=True
+    )
+    # Set by outlier detector (z-score vs user history) once user has enough rides
+    is_outlier: Mapped[bool] = mapped_column(
+        nullable=False, default=False, server_default="false"
+    )
+
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     user: Mapped["User"] = relationship("User", back_populates="activities")
