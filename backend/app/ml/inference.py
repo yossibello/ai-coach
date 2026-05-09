@@ -436,11 +436,20 @@ async def generate_multi_horizon_recommendation(
     # Pick the active horizon: prefer 'event' if user has one set, else 'medium'.
     active = "event" if (profile and profile.goal_event_date) else "medium"
 
+    # Attach supplement stack (rule-based, fast — runs in same request).
+    supplements = await _supplement_stack_for_user(
+        user, db, profile=profile, ctl=ctl,
+        activities=activities,
+        days_to_event=true_dte if (profile and profile.goal_event_date) else None,
+        workout_focus=out["medium"]["next_workout"].get("workout_type") if out.get("medium") else None,
+    )
+
     return {
         "horizons":       out,
         "is_cold_start":  False,
         "model_version":  out["medium"]["model_version"],
         "active_horizon": active,
+        "supplements":    supplements,
     }
 
 
@@ -456,4 +465,62 @@ def _horizon_label(label: str, days: int) -> str:
             return f"Peak for event in {days} days (taper window)"
         return f"Best path to peak on event day ({days} days out)"
     return label
+
+
+async def _supplement_stack_for_user(
+    user: User,
+    db: AsyncSession,
+    *,
+    profile: AthleteProfile | None,
+    ctl: float,
+    activities: list[Activity],
+    days_to_event: int | None,
+    workout_focus: str | None,
+) -> dict:
+    """
+    Compute the rule-based supplement stack for a user. Pulls latest blood test
+    if present. Lightweight enough to run in the same request as the recommendation.
+    """
+    from datetime import timedelta
+    from app.models.nutrition import BloodTest
+    from app.nutrition.engine import recommend_supplements
+
+    # Last 28 d windows
+    cutoff = datetime.now(timezone.utc) - timedelta(days=28)
+    recent = [a for a in activities if a.date and a.date >= cutoff.replace(tzinfo=None)] \
+        if activities else []
+    total_seconds = sum((a.duration_seconds or 0) for a in recent)
+    weekly_hours = (total_seconds / 3600.0) / 4.0
+    weekly_tss = sum((a.tss or 0) for a in recent) / 4.0
+    temps = [a.temperature_c for a in recent if a.temperature_c is not None]
+    recent_avg_temp = (sum(temps) / len(temps)) if temps else None
+
+    bt_res = await db.execute(
+        sa_select(BloodTest)
+        .where(BloodTest.user_id == user.id)
+        .order_by(desc(BloodTest.test_date))
+        .limit(1)
+    )
+    bt = bt_res.scalar_one_or_none()
+    blood_test = ({"id": bt.id, "markers": bt.markers} if bt else None)
+
+    profile_dict = {
+        "sex":   profile.sex if profile else None,
+        "age":   profile.age if profile else None,
+        "diet":  None,
+        "climate": None,
+        "training_days_per_week": profile.training_days_per_week if profile else None,
+    }
+
+    return recommend_supplements(
+        profile=profile_dict,
+        weekly_hours=weekly_hours,
+        ctl=ctl,
+        weekly_tss=weekly_tss,
+        recent_avg_temp_c=recent_avg_temp,
+        upcoming_event_type=None,
+        days_to_event=days_to_event,
+        workout_focus=workout_focus,
+        blood_test=blood_test,
+    )
 

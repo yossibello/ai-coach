@@ -30,6 +30,54 @@ STATEMENTS = [
     # Users ───────────────────────────────────────────────────────────────────
     "ALTER TABLE users ADD COLUMN IF NOT EXISTS allow_for_training BOOLEAN     NOT NULL DEFAULT TRUE",
     "ALTER TABLE users ADD COLUMN IF NOT EXISTS model_version      VARCHAR(50)",
+    # Nutrition ───────────────────────────────────────────────────────────────
+    """
+    CREATE TABLE IF NOT EXISTS blood_tests (
+        id                UUID PRIMARY KEY,
+        user_id           UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        test_date         TIMESTAMPTZ NOT NULL,
+        lab_name          VARCHAR(200),
+        source            VARCHAR(20) NOT NULL DEFAULT 'pdf',
+        raw_filename      VARCHAR(500),
+        parser_version    VARCHAR(20),
+        parser_confidence FLOAT,
+        markers           JSON NOT NULL DEFAULT '{}',
+        notes             TEXT,
+        created_at        TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS ix_blood_tests_user_id   ON blood_tests(user_id)",
+    "CREATE INDEX IF NOT EXISTS ix_blood_tests_test_date ON blood_tests(test_date)",
+    """
+    CREATE TABLE IF NOT EXISTS blood_markers (
+        id            UUID PRIMARY KEY,
+        user_id       UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        blood_test_id UUID NOT NULL REFERENCES blood_tests(id) ON DELETE CASCADE,
+        test_date     TIMESTAMPTZ NOT NULL,
+        marker_key    VARCHAR(50) NOT NULL,
+        value         FLOAT NOT NULL,
+        unit          VARCHAR(30),
+        ref_low       FLOAT,
+        ref_high      FLOAT,
+        status        VARCHAR(20) NOT NULL DEFAULT 'unknown'
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS ix_blood_markers_user_id    ON blood_markers(user_id)",
+    "CREATE INDEX IF NOT EXISTS ix_blood_markers_marker_key ON blood_markers(marker_key)",
+    "CREATE INDEX IF NOT EXISTS ix_blood_markers_status     ON blood_markers(status)",
+    """
+    CREATE TABLE IF NOT EXISTS supplement_recommendations (
+        id                     UUID PRIMARY KEY,
+        user_id                UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        generated_at           TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        engine_version         VARCHAR(50) NOT NULL DEFAULT 'rule_v1',
+        is_cold_start          BOOLEAN NOT NULL DEFAULT TRUE,
+        based_on_blood_test_id UUID REFERENCES blood_tests(id) ON DELETE SET NULL,
+        payload                JSON NOT NULL DEFAULT '{}'
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS ix_supp_recs_user_id      ON supplement_recommendations(user_id)",
+    "CREATE INDEX IF NOT EXISTS ix_supp_recs_generated_at ON supplement_recommendations(generated_at)",
 ]
 
 

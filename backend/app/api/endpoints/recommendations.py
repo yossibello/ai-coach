@@ -72,11 +72,14 @@ class MultiHorizonOut(BaseModel):
       • medium — best for 28-day build
       • event  — best path to peak on the user's goal-event date
     Each horizon's payload mirrors the standard RecommendationOut shape.
+    Also includes a rule-based supplement stack derived from training load
+    and (if available) the user's latest blood test.
     """
     is_cold_start:  bool
     model_version:  str
     active_horizon: str
     horizons:       dict[str, Any]
+    supplements:    dict[str, Any] | None = None
 
 
 @router.get("/recommendation/multi-horizon", response_model=MultiHorizonOut)
