@@ -259,4 +259,102 @@ export const nutritionAPI = {
     api.post<SupplementStack>("/api/v1/nutrition/supplements/refresh").then((r) => r.data),
 };
 
+// ─── Tracking (intake + performance tests) ───────────────────────────────────
+export interface SupplementIntakeRecord {
+  id: string;
+  supplement_key: string;
+  label: string;
+  dose: number | null;
+  dose_unit: string | null;
+  frequency: string | null;
+  timing: string | null;
+  started_at: string;
+  stopped_at: string | null;
+  adherence_pct: number | null;
+  source: string;
+  notes: string | null;
+  is_active: boolean;
+}
+
+export interface PerformanceTestRecord {
+  id: string;
+  test_date: string;
+  test_type: string;
+  value: number;
+  unit: string;
+  source: string;
+  notes: string | null;
+}
+
+export const trackingAPI = {
+  // Supplement intake
+  listIntakes: (active?: boolean) =>
+    api
+      .get<SupplementIntakeRecord[]>("/api/v1/tracking/intake", {
+        params: active === undefined ? {} : { active },
+      })
+      .then((r) => r.data),
+
+  createIntake: (body: {
+    supplement_key: string;
+    label?: string;
+    dose?: number;
+    dose_unit?: string;
+    frequency?: string;
+    timing?: string;
+    started_at?: string;
+    notes?: string;
+  }) =>
+    api.post<SupplementIntakeRecord>("/api/v1/tracking/intake", body).then((r) => r.data),
+
+  createIntakeFromRecommendation: (supplement_key: string, started_at?: string) =>
+    api
+      .post<SupplementIntakeRecord>("/api/v1/tracking/intake/from-recommendation", {
+        supplement_key,
+        started_at,
+      })
+      .then((r) => r.data),
+
+  updateIntake: (
+    id: string,
+    body: {
+      dose?: number;
+      dose_unit?: string;
+      frequency?: string;
+      timing?: string;
+      stopped_at?: string;
+      adherence_pct?: number;
+      notes?: string;
+    }
+  ) =>
+    api
+      .patch<SupplementIntakeRecord>(`/api/v1/tracking/intake/${id}`, body)
+      .then((r) => r.data),
+
+  deleteIntake: (id: string) =>
+    api.delete(`/api/v1/tracking/intake/${id}`).then((r) => r.data),
+
+  // Performance tests
+  listPerformanceTests: (test_type?: string) =>
+    api
+      .get<PerformanceTestRecord[]>("/api/v1/tracking/performance-tests", {
+        params: test_type ? { test_type } : {},
+      })
+      .then((r) => r.data),
+
+  createPerformanceTest: (body: {
+    test_date: string;
+    test_type: string;
+    value: number;
+    unit: string;
+    notes?: string;
+  }) =>
+    api
+      .post<PerformanceTestRecord>("/api/v1/tracking/performance-tests", body)
+      .then((r) => r.data),
+
+  deletePerformanceTest: (id: string) =>
+    api.delete(`/api/v1/tracking/performance-tests/${id}`).then((r) => r.data),
+};
+
 export default api;

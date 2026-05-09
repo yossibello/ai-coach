@@ -7,3 +7,7 @@ from app.models.nutrition import (  # noqa: F401
     BloodMarker,
     SupplementRecommendation,
 )
+from app.models.tracking import (  # noqa: F401
+    SupplementIntake,
+    PerformanceTest,
+)

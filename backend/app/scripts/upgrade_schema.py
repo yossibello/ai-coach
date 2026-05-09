@@ -81,6 +81,48 @@ STATEMENTS = [
     """,
     "CREATE INDEX IF NOT EXISTS ix_supp_recs_user_id      ON supplement_recommendations(user_id)",
     "CREATE INDEX IF NOT EXISTS ix_supp_recs_generated_at ON supplement_recommendations(generated_at)",
+
+    # Tracking: supplement intake + performance tests ─────────────────────────
+    """
+    CREATE TABLE IF NOT EXISTS supplement_intakes (
+        id             UUID PRIMARY KEY,
+        user_id        UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        supplement_key VARCHAR(80) NOT NULL,
+        label          VARCHAR(200) NOT NULL,
+        dose           FLOAT,
+        dose_unit      VARCHAR(40),
+        frequency      VARCHAR(80),
+        timing         VARCHAR(120),
+        started_at     TIMESTAMPTZ NOT NULL,
+        stopped_at     TIMESTAMPTZ,
+        adherence_pct  INTEGER,
+        source         VARCHAR(20) NOT NULL DEFAULT 'manual',
+        notes          TEXT,
+        created_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at     TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS ix_supp_intakes_user_id        ON supplement_intakes(user_id)",
+    "CREATE INDEX IF NOT EXISTS ix_supp_intakes_supplement_key ON supplement_intakes(supplement_key)",
+    "CREATE INDEX IF NOT EXISTS ix_supp_intakes_started_at     ON supplement_intakes(started_at)",
+    "CREATE INDEX IF NOT EXISTS ix_supp_intakes_stopped_at     ON supplement_intakes(stopped_at)",
+
+    """
+    CREATE TABLE IF NOT EXISTS performance_tests (
+        id         UUID PRIMARY KEY,
+        user_id    UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        test_date  TIMESTAMPTZ NOT NULL,
+        test_type  VARCHAR(40) NOT NULL,
+        value      FLOAT NOT NULL,
+        unit       VARCHAR(20) NOT NULL,
+        source     VARCHAR(20) NOT NULL DEFAULT 'manual',
+        notes      TEXT,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS ix_perf_tests_user_id   ON performance_tests(user_id)",
+    "CREATE INDEX IF NOT EXISTS ix_perf_tests_test_date ON performance_tests(test_date)",
+    "CREATE INDEX IF NOT EXISTS ix_perf_tests_test_type ON performance_tests(test_type)",
 ]
 
 

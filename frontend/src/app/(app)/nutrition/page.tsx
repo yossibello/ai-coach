@@ -14,18 +14,25 @@ import {
   Info,
   ExternalLink,
   Loader2,
+  ClipboardList,
+  Plus,
+  Activity as ActivityIcon,
+  Square,
 } from "lucide-react";
 import toast from "react-hot-toast";
 import {
   nutritionAPI,
+  trackingAPI,
   type BloodTest,
   type SupplementItem,
   type SupplementWarning,
   type MarkerTimeSeries,
+  type SupplementIntakeRecord,
+  type PerformanceTestRecord,
 } from "@/lib/api";
 import { cn } from "@/lib/utils";
 
-type Tab = "tests" | "supplements" | "trends";
+type Tab = "tests" | "supplements" | "trends" | "log";
 
 export default function NutritionPage() {
   const [tab, setTab] = useState<Tab>("supplements");
@@ -56,11 +63,15 @@ export default function NutritionPage() {
         <TabBtn active={tab === "trends"} onClick={() => setTab("trends")}>
           <TrendingUp className="w-4 h-4" /> Marker Trends
         </TabBtn>
+        <TabBtn active={tab === "log"} onClick={() => setTab("log")}>
+          <ClipboardList className="w-4 h-4" /> My Log
+        </TabBtn>
       </div>
 
       {tab === "supplements" && <SupplementsTab />}
       {tab === "tests" && <BloodTestsTab />}
       {tab === "trends" && <TrendsTab />}
+      {tab === "log" && <LogTab />}
     </div>
   );
 }
@@ -181,6 +192,15 @@ function SupplementsTab() {
 
 function SupplementCard({ item }: { item: SupplementItem }) {
   const [expanded, setExpanded] = useState(false);
+  const qc = useQueryClient();
+  const logIt = useMutation({
+    mutationFn: () => trackingAPI.createIntakeFromRecommendation(item.supplement_key),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["intakes"] });
+      toast.success(`Logged: ${item.label}`);
+    },
+    onError: () => toast.error("Could not log intake"),
+  });
   const gradeColor =
     item.evidence_grade === "A"
       ? "bg-emerald-500/15 text-emerald-400 border-emerald-500/30"
@@ -228,8 +248,24 @@ function SupplementCard({ item }: { item: SupplementItem }) {
           >
             {expanded ? "Hide" : "Show"} citations &amp; trigger
           </button>
+        </div>
 
-          {expanded && (
+        <button
+          onClick={() => logIt.mutate()}
+          disabled={logIt.isPending}
+          title="I'm taking this"
+          className="flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium bg-brand-500/10 hover:bg-brand-500/20 text-brand-400 border border-brand-500/30 disabled:opacity-50 self-start whitespace-nowrap"
+        >
+          {logIt.isPending ? (
+            <Loader2 className="w-3.5 h-3.5 animate-spin" />
+          ) : (
+            <Plus className="w-3.5 h-3.5" />
+          )}
+          Log it
+        </button>
+      </div>
+
+      {expanded && (
             <div className="mt-2 space-y-1.5 text-xs text-slate-400">
               <div>
                 <span className="text-slate-500">Triggered by: </span>
@@ -250,8 +286,6 @@ function SupplementCard({ item }: { item: SupplementItem }) {
             </div>
           )}
         </div>
-      </div>
-    </div>
   );
 }
 
@@ -631,6 +665,395 @@ function Empty({ msg }: { msg: string }) {
   return (
     <div className="p-8 rounded-lg bg-surface-card border border-surface-border text-center text-slate-400 text-sm">
       {msg}
+    </div>
+  );
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// Log tab — what I'm taking + my performance tests
+// ════════════════════════════════════════════════════════════════════════════
+const TEST_TYPES: { value: string; label: string; defaultUnit: string }[] = [
+  { value: "ftp_20min",    label: "FTP (20-min test)", defaultUnit: "W" },
+  { value: "ftp_ramp",     label: "FTP (ramp test)",   defaultUnit: "W" },
+  { value: "ftp_8min",     label: "FTP (8-min test)",  defaultUnit: "W" },
+  { value: "vo2max",       label: "VO2max",            defaultUnit: "ml/kg/min" },
+  { value: "threshold_hr", label: "Threshold HR",      defaultUnit: "bpm" },
+  { value: "resting_hr",   label: "Resting HR",        defaultUnit: "bpm" },
+  { value: "weight",       label: "Body weight",       defaultUnit: "kg" },
+];
+
+function LogTab() {
+  return (
+    <div className="space-y-6">
+      <ActiveStackSection />
+      <PerformanceTestsSection />
+    </div>
+  );
+}
+
+// ── Active supplement intake ────────────────────────────────────────────────
+function ActiveStackSection() {
+  const qc = useQueryClient();
+  const { data: intakes, isLoading } = useQuery({
+    queryKey: ["intakes"],
+    queryFn: () => trackingAPI.listIntakes(),
+  });
+
+  const stop = useMutation({
+    mutationFn: (id: string) =>
+      trackingAPI.updateIntake(id, { stopped_at: new Date().toISOString() }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["intakes"] });
+      toast.success("Stopped");
+    },
+  });
+
+  const setAdherence = useMutation({
+    mutationFn: (args: { id: string; pct: number }) =>
+      trackingAPI.updateIntake(args.id, { adherence_pct: args.pct }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["intakes"] }),
+  });
+
+  const del = useMutation({
+    mutationFn: (id: string) => trackingAPI.deleteIntake(id),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["intakes"] });
+      toast.success("Deleted");
+    },
+  });
+
+  const active = (intakes ?? []).filter((i) => i.is_active);
+  const past = (intakes ?? []).filter((i) => !i.is_active);
+
+  return (
+    <section className="space-y-3">
+      <div className="flex items-center justify-between">
+        <h2 className="text-lg font-semibold text-white flex items-center gap-2">
+          <Pill className="w-5 h-5 text-brand-500" /> Currently Taking
+        </h2>
+        <p className="text-xs text-slate-500">
+          Use the &quot;Log it&quot; button on any recommended supplement to start tracking.
+        </p>
+      </div>
+
+      {isLoading ? (
+        <Loading label="Loading log…" />
+      ) : active.length === 0 ? (
+        <Empty msg="Nothing logged as active yet." />
+      ) : (
+        <div className="space-y-2">
+          {active.map((i) => (
+            <IntakeRow
+              key={i.id}
+              intake={i}
+              onStop={() => stop.mutate(i.id)}
+              onDelete={() => del.mutate(i.id)}
+              onAdherence={(pct) => setAdherence.mutate({ id: i.id, pct })}
+            />
+          ))}
+        </div>
+      )}
+
+      {past.length > 0 && (
+        <details className="mt-4">
+          <summary className="text-sm text-slate-400 cursor-pointer hover:text-white">
+            History ({past.length})
+          </summary>
+          <div className="mt-2 space-y-2">
+            {past.map((i) => (
+              <IntakeRow
+                key={i.id}
+                intake={i}
+                onDelete={() => del.mutate(i.id)}
+                onAdherence={(pct) => setAdherence.mutate({ id: i.id, pct })}
+              />
+            ))}
+          </div>
+        </details>
+      )}
+    </section>
+  );
+}
+
+function IntakeRow({
+  intake,
+  onStop,
+  onDelete,
+  onAdherence,
+}: {
+  intake: SupplementIntakeRecord;
+  onStop?: () => void;
+  onDelete: () => void;
+  onAdherence: (pct: number) => void;
+}) {
+  const days = Math.max(
+    1,
+    Math.round(
+      ((intake.stopped_at ? new Date(intake.stopped_at) : new Date()).getTime() -
+        new Date(intake.started_at).getTime()) /
+        86400000
+    )
+  );
+  return (
+    <div className="p-3 rounded-lg bg-surface-card border border-surface-border">
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0">
+          <p className="text-sm text-white font-medium">{intake.label}</p>
+          <p className="text-xs text-slate-400 mt-0.5">
+            {intake.dose != null && (
+              <>
+                {intake.dose} {intake.dose_unit}
+                {intake.frequency ? ` · ${intake.frequency}` : ""} ·{" "}
+              </>
+            )}
+            {days}d {intake.is_active ? "and counting" : "total"}
+            {intake.source === "recommended" ? " · from coach" : ""}
+          </p>
+        </div>
+        <div className="flex items-center gap-1.5">
+          {intake.is_active && onStop && (
+            <button
+              onClick={onStop}
+              className="p-1.5 rounded text-slate-400 hover:text-amber-400 hover:bg-amber-500/10"
+              title="Stop taking"
+            >
+              <Square className="w-3.5 h-3.5" />
+            </button>
+          )}
+          <button
+            onClick={onDelete}
+            className="p-1.5 rounded text-slate-400 hover:text-red-400 hover:bg-red-500/10"
+            title="Delete"
+          >
+            <Trash2 className="w-3.5 h-3.5" />
+          </button>
+        </div>
+      </div>
+
+      {/* Adherence */}
+      <div className="mt-2 flex items-center gap-2">
+        <span className="text-[10px] uppercase tracking-wide text-slate-500">
+          Adherence
+        </span>
+        <input
+          type="range"
+          min={0}
+          max={100}
+          step={5}
+          defaultValue={intake.adherence_pct ?? 100}
+          onChange={(e) => onAdherence(Number(e.target.value))}
+          className="flex-1 accent-brand-500"
+        />
+        <span className="text-xs text-slate-300 w-10 text-right">
+          {intake.adherence_pct ?? 100}%
+        </span>
+      </div>
+    </div>
+  );
+}
+
+// ── Performance tests ───────────────────────────────────────────────────────
+function PerformanceTestsSection() {
+  const qc = useQueryClient();
+  const { data: tests, isLoading } = useQuery({
+    queryKey: ["perf-tests"],
+    queryFn: () => trackingAPI.listPerformanceTests(),
+  });
+
+  const [showForm, setShowForm] = useState(false);
+
+  const create = useMutation({
+    mutationFn: (b: {
+      test_date: string;
+      test_type: string;
+      value: number;
+      unit: string;
+      notes?: string;
+    }) => trackingAPI.createPerformanceTest(b),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["perf-tests"] });
+      toast.success("Test logged");
+      setShowForm(false);
+    },
+    onError: (e: { response?: { data?: { detail?: string } } }) =>
+      toast.error(e?.response?.data?.detail ?? "Failed to log test"),
+  });
+
+  const del = useMutation({
+    mutationFn: (id: string) => trackingAPI.deletePerformanceTest(id),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["perf-tests"] }),
+  });
+
+  return (
+    <section className="space-y-3">
+      <div className="flex items-center justify-between">
+        <h2 className="text-lg font-semibold text-white flex items-center gap-2">
+          <ActivityIcon className="w-5 h-5 text-brand-500" /> Performance Tests
+        </h2>
+        <button
+          onClick={() => setShowForm((v) => !v)}
+          className="flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium bg-brand-500 hover:bg-brand-400 text-white"
+        >
+          <Plus className="w-3.5 h-3.5" />
+          {showForm ? "Cancel" : "Log a test"}
+        </button>
+      </div>
+
+      {showForm && <PerfTestForm onSubmit={(b) => create.mutate(b)} pending={create.isPending} />}
+
+      {isLoading ? (
+        <Loading label="Loading…" />
+      ) : !tests || tests.length === 0 ? (
+        <Empty msg="No performance tests logged yet. Log an FTP test to start tracking." />
+      ) : (
+        <div className="space-y-2">
+          {tests.map((t) => (
+            <PerfTestRow key={t.id} test={t} onDelete={() => del.mutate(t.id)} />
+          ))}
+        </div>
+      )}
+    </section>
+  );
+}
+
+function PerfTestRow({
+  test,
+  onDelete,
+}: {
+  test: PerformanceTestRecord;
+  onDelete: () => void;
+}) {
+  const def = TEST_TYPES.find((t) => t.value === test.test_type);
+  return (
+    <div className="p-3 rounded-lg bg-surface-card border border-surface-border flex items-center justify-between">
+      <div>
+        <p className="text-sm text-white font-medium">
+          {def?.label ?? test.test_type} ·{" "}
+          <span className="text-brand-400">
+            {test.value} {test.unit}
+          </span>
+        </p>
+        <p className="text-xs text-slate-400 mt-0.5">
+          {new Date(test.test_date).toLocaleDateString()}
+          {test.notes ? ` · ${test.notes}` : ""}
+        </p>
+      </div>
+      <button
+        onClick={onDelete}
+        className="p-1.5 rounded text-slate-400 hover:text-red-400 hover:bg-red-500/10"
+      >
+        <Trash2 className="w-3.5 h-3.5" />
+      </button>
+    </div>
+  );
+}
+
+function PerfTestForm({
+  onSubmit,
+  pending,
+}: {
+  onSubmit: (b: {
+    test_date: string;
+    test_type: string;
+    value: number;
+    unit: string;
+    notes?: string;
+  }) => void;
+  pending: boolean;
+}) {
+  const [type, setType] = useState(TEST_TYPES[0].value);
+  const [date, setDate] = useState(() => new Date().toISOString().slice(0, 10));
+  const [value, setValue] = useState<string>("");
+  const [unit, setUnit] = useState(TEST_TYPES[0].defaultUnit);
+  const [notes, setNotes] = useState("");
+
+  const handleTypeChange = (v: string) => {
+    setType(v);
+    const def = TEST_TYPES.find((t) => t.value === v);
+    if (def) setUnit(def.defaultUnit);
+  };
+
+  const submit = () => {
+    const num = Number(value);
+    if (!num || num <= 0) {
+      toast.error("Enter a positive value");
+      return;
+    }
+    onSubmit({
+      test_date: new Date(date).toISOString(),
+      test_type: type,
+      value: num,
+      unit,
+      notes: notes || undefined,
+    });
+  };
+
+  return (
+    <div className="p-4 rounded-lg bg-surface-card border border-surface-border grid sm:grid-cols-2 lg:grid-cols-5 gap-3">
+      <label className="flex flex-col gap-1 text-xs text-slate-400">
+        Type
+        <select
+          value={type}
+          onChange={(e) => handleTypeChange(e.target.value)}
+          className="px-2 py-1.5 rounded bg-surface-muted border border-surface-border text-sm text-white"
+        >
+          {TEST_TYPES.map((t) => (
+            <option key={t.value} value={t.value}>
+              {t.label}
+            </option>
+          ))}
+        </select>
+      </label>
+
+      <label className="flex flex-col gap-1 text-xs text-slate-400">
+        Date
+        <input
+          type="date"
+          value={date}
+          onChange={(e) => setDate(e.target.value)}
+          className="px-2 py-1.5 rounded bg-surface-muted border border-surface-border text-sm text-white"
+        />
+      </label>
+
+      <label className="flex flex-col gap-1 text-xs text-slate-400">
+        Value
+        <input
+          type="number"
+          inputMode="decimal"
+          value={value}
+          onChange={(e) => setValue(e.target.value)}
+          className="px-2 py-1.5 rounded bg-surface-muted border border-surface-border text-sm text-white"
+        />
+      </label>
+
+      <label className="flex flex-col gap-1 text-xs text-slate-400">
+        Unit
+        <input
+          value={unit}
+          onChange={(e) => setUnit(e.target.value)}
+          className="px-2 py-1.5 rounded bg-surface-muted border border-surface-border text-sm text-white"
+        />
+      </label>
+
+      <label className="flex flex-col gap-1 text-xs text-slate-400">
+        Notes (optional)
+        <input
+          value={notes}
+          onChange={(e) => setNotes(e.target.value)}
+          className="px-2 py-1.5 rounded bg-surface-muted border border-surface-border text-sm text-white"
+        />
+      </label>
+
+      <div className="sm:col-span-2 lg:col-span-5 flex justify-end">
+        <button
+          onClick={submit}
+          disabled={pending}
+          className="px-4 py-2 rounded-md text-sm font-medium bg-brand-500 hover:bg-brand-400 text-white disabled:opacity-50 flex items-center gap-2"
+        >
+          {pending && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
+          Save test
+        </button>
+      </div>
     </div>
   );
 }
