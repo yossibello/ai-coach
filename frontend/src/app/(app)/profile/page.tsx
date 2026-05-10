@@ -4,8 +4,10 @@ import { useQuery, useMutation } from "@tanstack/react-query";
 import { profileAPI } from "@/lib/api";
 import { useState, useEffect } from "react";
 import type { AthleteProfile, GoalType } from "@/types";
-import { User, Save, Loader2 } from "lucide-react";
+import { User, Save, Loader2, Link2 } from "lucide-react";
 import toast from "react-hot-toast";
+import GarminConnect from "@/components/integrations/GarminConnect";
+import StravaConnect from "@/components/integrations/StravaConnect";
 
 const GOALS: { value: GoalType; label: string }[] = [
   { value: "general_fitness",  label: "General Fitness" },
@@ -147,6 +149,17 @@ export default function ProfilePage() {
           </>
         ) : null}
       </Section>
+
+      <div className="bg-surface-card border border-surface-border rounded-2xl p-6">
+        <h2 className="text-sm font-semibold text-slate-400 uppercase tracking-wider mb-5 flex items-center gap-2">
+          <Link2 className="w-4 h-4" />
+          Integrations
+        </h2>
+        <div className="space-y-4">
+          <GarminConnect />
+          <StravaConnect />
+        </div>
+      </div>
 
       <style jsx>{`
         .input-field {

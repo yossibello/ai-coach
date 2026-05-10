@@ -6,11 +6,47 @@ import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { profileAPI } from "@/lib/api";
 import toast from "react-hot-toast";
 
+// Defined OUTSIDE the page component so React never unmounts/remounts it on re-render.
+function InputField({
+  label,
+  type = "text",
+  placeholder,
+  min,
+  max,
+  value,
+  onChange,
+}: {
+  label: string;
+  type?: string;
+  placeholder?: string;
+  min?: number;
+  max?: number;
+  value: string;
+  onChange: (v: string) => void;
+}) {
+  return (
+    <div>
+      <label className="block text-sm font-medium text-gray-300 mb-1">{label}</label>
+      <input
+        type={type}
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        placeholder={placeholder}
+        min={min}
+        max={max}
+        className="w-full bg-surface-card border border-surface-border rounded-lg px-3 py-2
+                   text-white placeholder-gray-500 focus:outline-none focus:ring-2
+                   focus:ring-brand-500 transition"
+      />
+    </div>
+  );
+}
+
 const GOALS = [
   { value: "general_fitness", label: "General fitness & health" },
-  { value: "event_training", label: "Train for a specific event" },
+  { value: "event_specific", label: "Train for a specific event" },
   { value: "ftp_improvement", label: "Improve FTP / power" },
-  { value: "endurance", label: "Build endurance" },
+  { value: "gran_fondo", label: "Gran Fondo / endurance" },
   { value: "weight_loss", label: "Weight loss" },
 ];
 
@@ -26,15 +62,15 @@ export default function ProfileSetupPage() {
   const queryClient = useQueryClient();
 
   const [form, setForm] = useState({
-    age: "",
-    weight_kg: "",
-    height_cm: "",
-    sex: "male",
-    ftp: "",
-    max_hr: "",
-    resting_hr: "",
-    cycling_experience_years: "",
-    primary_goal: "general_fitness",
+    age: "30",
+    weight_kg: "70",
+    height_cm: "177",
+    sex: "male" as "male" | "female" | "other",
+    ftp: "200",
+    max_hr: "185",
+    resting_hr: "55",
+    cycling_experience_years: "2",
+    primary_goal: "general_fitness" as import("@/types").GoalType,
     training_days_per_week: "4",
     goal_event_name: "",
     goal_event_date: "",
@@ -42,6 +78,11 @@ export default function ProfileSetupPage() {
 
   const update = (field: string, value: string) =>
     setForm((f) => ({ ...f, [field]: value }));
+
+  const field = (name: string) => ({
+    value: (form as Record<string, string>)[name],
+    onChange: (v: string) => update(name, v),
+  });
 
   const mutation = useMutation({
     mutationFn: () =>
@@ -68,33 +109,6 @@ export default function ProfileSetupPage() {
     onError: () => toast.error("Failed to save profile"),
   });
 
-  const InputField = ({
-    label,
-    field,
-    type = "text",
-    placeholder,
-  }: {
-    label: string;
-    field: string;
-    type?: string;
-    placeholder?: string;
-  }) => (
-    <div>
-      <label className="block text-sm font-medium text-gray-300 mb-1">
-        {label}
-      </label>
-      <input
-        type={type}
-        value={(form as Record<string, string>)[field]}
-        onChange={(e) => update(field, e.target.value)}
-        placeholder={placeholder}
-        className="w-full bg-surface-card border border-surface-border rounded-lg px-3 py-2
-                   text-white placeholder-gray-500 focus:outline-none focus:ring-2
-                   focus:ring-brand-500 transition"
-      />
-    </div>
-  );
-
   return (
     <div className="min-h-screen bg-surface-bg flex items-center justify-center p-4">
       <div className="w-full max-w-2xl">
@@ -113,19 +127,9 @@ export default function ProfileSetupPage() {
           <section>
             <h2 className="text-lg font-semibold text-white mb-4">Physical</h2>
             <div className="grid grid-cols-2 gap-4">
-              <InputField label="Age" field="age" type="number" placeholder="32" />
-              <InputField
-                label="Weight (kg)"
-                field="weight_kg"
-                type="number"
-                placeholder="72"
-              />
-              <InputField
-                label="Height (cm)"
-                field="height_cm"
-                type="number"
-                placeholder="178"
-              />
+              <InputField label="Age" {...field("age")} type="number" min={10} max={100} />
+              <InputField label="Weight (kg)" {...field("weight_kg")} type="number" min={30} max={250} />
+              <InputField label="Height (cm)" {...field("height_cm")} type="number" min={100} max={230} />
               <div>
                 <label className="block text-sm font-medium text-gray-300 mb-1">
                   Sex
@@ -146,18 +150,11 @@ export default function ProfileSetupPage() {
 
           {/* Performance */}
           <section>
-            <h2 className="text-lg font-semibold text-white mb-4">
-              Performance
-            </h2>
+            <h2 className="text-lg font-semibold text-white mb-4">Performance</h2>
             <div className="grid grid-cols-3 gap-4">
-              <InputField label="FTP (watts)" field="ftp" type="number" placeholder="250" />
-              <InputField label="Max HR (bpm)" field="max_hr" type="number" placeholder="185" />
-              <InputField
-                label="Resting HR (bpm)"
-                field="resting_hr"
-                type="number"
-                placeholder="52"
-              />
+              <InputField label="FTP (watts)" {...field("ftp")} type="number" min={50} max={600} />
+              <InputField label="Max HR (bpm)" {...field("max_hr")} type="number" min={100} max={230} />
+              <InputField label="Resting HR (bpm)" {...field("resting_hr")} type="number" min={30} max={120} />
             </div>
           </section>
 
@@ -201,18 +198,10 @@ export default function ProfileSetupPage() {
               </div>
             </div>
 
-            {form.primary_goal === "event_training" && (
+            {(form.primary_goal === "event_specific" || form.primary_goal === "gran_fondo" || form.primary_goal === "criterium") && (
               <div className="grid grid-cols-2 gap-4 mt-4">
-                <InputField
-                  label="Event name"
-                  field="goal_event_name"
-                  placeholder="Gran Fondo Alps"
-                />
-                <InputField
-                  label="Event date"
-                  field="goal_event_date"
-                  type="date"
-                />
+                <InputField label="Event name" {...field("goal_event_name")} placeholder="Gran Fondo Alps" />
+                <InputField label="Event date" {...field("goal_event_date")} type="date" />
               </div>
             )}
           </section>

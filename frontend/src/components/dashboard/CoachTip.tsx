@@ -33,7 +33,8 @@ export function CoachTip({ recommendation }: Props) {
         <>
           <div className="mb-2">
             <span className="text-lg font-bold text-white capitalize">
-              Today: {next_workout.workout_type.replace("_", " ")}
+              {next_workout.day_offset === 0 ? "Today" : next_workout.day_offset === 1 ? "Tomorrow" : `Day ${next_workout.day_offset + 1}`}:{" "}
+              {next_workout.workout_type.replace("_", " ")}
             </span>
             <span className="text-slate-400 text-sm ml-2">· {next_workout.duration_minutes} min</span>
           </div>

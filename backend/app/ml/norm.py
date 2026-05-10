@@ -66,6 +66,11 @@ NORM_BOUNDS: dict[str, tuple[float, float]] = {
     "days_since_last":   (0.0, 21.0),
     # Subjective
     "rpe":               (1.0, 10.0),
+    # Health & recovery (Garmin daily wellness)
+    "hrv_z":             (-2.5, 2.5),    # z-score vs 7d baseline (Plews & Buchheit 2013)
+    "rhr_delta":         (-10.0, 15.0),  # bpm vs 30d baseline (Buchheit 2014)
+    "sleep_score":       (0.0, 100.0),
+    "body_battery":      (0.0, 100.0),
     # Profile
     "age":               (15.0, 80.0),
     "weight_kg":         (40.0, 120.0),
@@ -116,6 +121,13 @@ def encode_activity_row(
     def g(key, default=0.0):
         v = act.get(key, default)
         return default if v is None else v
+
+    # Health-and-recovery defaults: 0 z-score / 0 delta / neutral 50 puts the
+    # signal at the centre of its bound, equivalent to "unknown / typical".
+    hrv_z        = g("hrv_z", 0.0)
+    rhr_delta    = g("rhr_delta", 0.0)
+    sleep_score  = g("sleep_score", 50.0)
+    body_battery = g("body_battery", 50.0)
 
     duration_h   = g("duration_seconds", 0.0) / 3600.0
     distance_km  = g("distance_meters", 0.0) / 1000.0
@@ -199,6 +211,11 @@ def encode_activity_row(
         n01(days_since_last, "days_since_last"),
         *wt_vec,
         n01(rpe, "rpe"),
+        # Health & recovery
+        n01(hrv_z, "hrv_z"),
+        n01(rhr_delta, "rhr_delta"),
+        n01(sleep_score, "sleep_score"),
+        n01(body_battery, "body_battery"),
     ]
     arr = np.asarray(vec, dtype=np.float32)
     assert arr.shape[0] == ACTIVITY_DIM, (
@@ -286,6 +303,31 @@ def encode_activity_dataframe(df) -> np.ndarray:
     ]
     cols.extend(wt_oh[:, i] for i in range(len(WORKOUT_TYPES)))
     cols.append(_norm_array(df["perceived_exertion"].fillna(5).to_numpy(dtype=np.float32), "rpe"))
+
+    # ── Health & recovery (defaults centre each signal in its bound) ──────
+    # If a column is missing entirely (older parquet), fillna(default) keeps
+    # the resulting normalized value at the neutral midpoint.
+    if "hrv_z" in df.columns:
+        hrv_z_arr = df["hrv_z"].fillna(0.0).to_numpy(dtype=np.float32)
+    else:
+        hrv_z_arr = np.zeros(len(df), dtype=np.float32)
+    if "rhr_delta" in df.columns:
+        rhr_d_arr = df["rhr_delta"].fillna(0.0).to_numpy(dtype=np.float32)
+    else:
+        rhr_d_arr = np.zeros(len(df), dtype=np.float32)
+    if "sleep_score" in df.columns:
+        sleep_arr = df["sleep_score"].fillna(50.0).to_numpy(dtype=np.float32)
+    else:
+        sleep_arr = np.full(len(df), 50.0, dtype=np.float32)
+    if "body_battery" in df.columns:
+        bb_arr = df["body_battery"].fillna(50.0).to_numpy(dtype=np.float32)
+    else:
+        bb_arr = np.full(len(df), 50.0, dtype=np.float32)
+
+    cols.append(_norm_array(hrv_z_arr, "hrv_z"))
+    cols.append(_norm_array(rhr_d_arr, "rhr_delta"))
+    cols.append(_norm_array(sleep_arr, "sleep_score"))
+    cols.append(_norm_array(bb_arr, "body_battery"))
 
     out = np.stack(cols, axis=1).astype(np.float32)
     assert out.shape[1] == ACTIVITY_DIM, f"got {out.shape[1]} cols, expected {ACTIVITY_DIM}"

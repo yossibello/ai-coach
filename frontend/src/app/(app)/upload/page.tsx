@@ -1,12 +1,13 @@
-"use client";
+﻿"use client";
 
 import { useState, useCallback } from "react";
 import { useDropzone } from "react-dropzone";
-import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { activitiesAPI, stravaAPI } from "@/lib/api";
-import { Upload, FileText, CheckCircle, XCircle, Loader2, RefreshCw, Link2 } from "lucide-react";
+import { useQueryClient } from "@tanstack/react-query";
+import { activitiesAPI } from "@/lib/api";
+import { Upload, FileText, CheckCircle, XCircle, Loader2, Settings } from "lucide-react";
 import { cn } from "@/lib/utils";
 import toast from "react-hot-toast";
+import Link from "next/link";
 import type { UploadResult } from "@/types";
 
 interface UploadJob {
@@ -18,7 +19,6 @@ interface UploadJob {
 
 export default function UploadPage() {
   const [jobs, setJobs] = useState<UploadJob[]>([]);
-  const [syncTaskId, setSyncTaskId] = useState<string | null>(null);
   const qc = useQueryClient();
 
   const onDrop = useCallback(async (accepted: File[]) => {
@@ -66,65 +66,29 @@ export default function UploadPage() {
       "application/octet-stream": [".fit"],
       "application/xml": [".gpx", ".tcx"],
     },
-    maxSize: 50 * 1024 * 1024,  // 50 MB
+    maxSize: 50 * 1024 * 1024,
   });
-
-  async function handleStravaSync() {
-    try {
-      const { task_id } = await stravaAPI.syncHistory();
-      setSyncTaskId(task_id);
-      toast.success("Strava sync started — this may take a few minutes");
-    } catch {
-      toast.error("Strava sync failed. Is your account connected?");
-    }
-  }
-
-  async function connectStrava() {
-    const url = await stravaAPI.getAuthURL();
-    window.location.href = url;
-  }
 
   return (
     <div className="p-6 space-y-8 animate-fade-in max-w-3xl">
       <div>
-        <h1 className="text-2xl font-bold text-white">Upload & Sync</h1>
+        <h1 className="text-2xl font-bold text-white">Upload</h1>
         <p className="text-slate-400 text-sm mt-1">
-          Import rides from Strava, Garmin, or upload GPX / FIT files directly
+          Import rides manually by uploading GPX, FIT, or TCX files.
         </p>
       </div>
 
-      {/* Strava section */}
-      <div className="bg-surface-card border border-surface-border rounded-2xl p-6">
-        <div className="flex items-center gap-3 mb-4">
-          <div className="w-8 h-8 bg-orange-500/10 rounded-lg flex items-center justify-center">
-            <span className="text-orange-400 font-bold text-sm">S</span>
-          </div>
-          <div>
-            <h2 className="font-semibold text-white">Strava</h2>
-            <p className="text-xs text-slate-400">Import your full activity history</p>
-          </div>
-        </div>
-        <div className="flex gap-3">
-          <button
-            onClick={connectStrava}
-            className="flex items-center gap-2 px-4 py-2 bg-orange-500 hover:bg-orange-600 text-white text-sm font-medium rounded-xl transition-colors"
-          >
-            <Link2 className="w-4 h-4" />
-            Connect Strava
-          </button>
-          <button
-            onClick={handleStravaSync}
-            disabled={!!syncTaskId}
-            className="flex items-center gap-2 px-4 py-2 bg-surface border border-surface-border hover:border-orange-500/50 text-slate-300 text-sm rounded-xl transition-colors disabled:opacity-50"
-          >
-            <RefreshCw className={cn("w-4 h-4", syncTaskId && "animate-spin")} />
-            {syncTaskId ? "Syncing…" : "Sync history"}
-          </button>
-        </div>
-        {syncTaskId && <SyncProgress taskId={syncTaskId} />}
+      <div className="flex items-center gap-3 px-4 py-3 bg-surface-card border border-surface-border rounded-xl text-sm text-slate-400">
+        <Settings className="w-4 h-4 flex-shrink-0 text-brand-400" />
+        <span>
+          To sync from Garmin or Strava, go to{" "}
+          <Link href="/profile" className="text-brand-400 hover:text-brand-300 underline underline-offset-2">
+            Profile &rarr; Integrations
+          </Link>
+          .
+        </span>
       </div>
 
-      {/* File upload */}
       <div>
         <h2 className="font-semibold text-white mb-3">Upload Files</h2>
         <div
@@ -141,11 +105,10 @@ export default function UploadPage() {
           <p className="text-white font-medium mb-1">
             {isDragActive ? "Drop to upload" : "Drag & drop rides here"}
           </p>
-          <p className="text-sm text-slate-400">Supports .gpx, .fit, .tcx · Max 50 MB per file</p>
+          <p className="text-sm text-slate-400">Supports .gpx, .fit, .tcx &middot; Max 50 MB per file</p>
         </div>
       </div>
 
-      {/* Upload queue */}
       {jobs.length > 0 && (
         <div className="space-y-2">
           <h3 className="text-sm font-medium text-slate-400">Upload queue</h3>
@@ -179,36 +142,6 @@ function UploadJobRow({ job }: { job: UploadJob }) {
       {job.status === "error" && (
         <span className="text-xs text-red-400">Failed</span>
       )}
-    </div>
-  );
-}
-
-function SyncProgress({ taskId }: { taskId: string }) {
-  const { data } = useQuery({
-    queryKey: ["strava-sync", taskId],
-    queryFn: () => stravaAPI.getSyncStatus(taskId),
-    refetchInterval: (query) => {
-      const d = query.state.data;
-      return d?.status === "completed" || d?.status === "failed" ? false : 3000;
-    },
-  });
-
-  if (!data) return null;
-
-  const pct = data.total > 0 ? Math.round((data.progress / data.total) * 100) : 0;
-
-  return (
-    <div className="mt-4">
-      <div className="flex items-center justify-between text-xs text-slate-400 mb-2">
-        <span className="capitalize">{data.status}</span>
-        <span>{data.progress} / {data.total} activities</span>
-      </div>
-      <div className="h-1.5 bg-surface rounded-full overflow-hidden">
-        <div
-          className="h-full bg-brand-500 transition-all duration-500"
-          style={{ width: `${pct}%` }}
-        />
-      </div>
     </div>
   );
 }

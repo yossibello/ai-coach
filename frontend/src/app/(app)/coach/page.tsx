@@ -1,11 +1,19 @@
 "use client";
 
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import { useEffect } from "react";
 import { coachAPI } from "@/lib/api";
 import { Brain, RefreshCw, AlertTriangle, CheckCircle, Info, Zap, Calendar } from "lucide-react";
 import { cn, formatDuration } from "@/lib/utils";
 import type { CoachRecommendation, WorkoutPlan, CoachInsight, TrainingRisk } from "@/types";
 import toast from "react-hot-toast";
+
+function isStale(generatedAt: string | undefined): boolean {
+  if (!generatedAt) return true;
+  const recDate = new Date(generatedAt).toDateString();
+  const today = new Date().toDateString();
+  return recDate !== today;
+}
 
 export default function CoachPage() {
   const qc = useQueryClient();
@@ -22,6 +30,14 @@ export default function CoachPage() {
       toast.success("Recommendation updated");
     },
   });
+
+  // Auto-refresh if the stored recommendation is from a previous day
+  useEffect(() => {
+    if (!isLoading && isStale(data?.generated_at)) {
+      refresh.mutate();
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isLoading]);
 
   if (isLoading) {
     return (
@@ -159,7 +175,14 @@ function InsightGrid({ insights }: { insights: CoachInsight[] }) {
 }
 
 function WorkoutCard({ plan, highlight }: { plan: WorkoutPlan; highlight: boolean }) {
-  const dayLabel = plan.day_offset === 0 ? "Today" : plan.day_offset === 1 ? "Tomorrow" : `Day ${plan.day_offset + 1}`;
+  const labelDate = new Date();
+  labelDate.setDate(labelDate.getDate() + plan.day_offset);
+  const dayLabel =
+    plan.day_offset === 0
+      ? "Today"
+      : plan.day_offset === 1
+      ? "Tomorrow"
+      : labelDate.toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric" });
 
   const TYPE_COLOR: Record<string, string> = {
     easy: "text-blue-400 bg-blue-500/10 border-blue-500/20",

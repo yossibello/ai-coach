@@ -31,7 +31,7 @@ class ActivityOut(BaseModel):
     avg_power: Optional[float]
     normalized_power: Optional[float]
     tss: Optional[float]
-    avg_hr: Optional[int]
+    avg_hr: Optional[float]
     hr_drift: Optional[float]
     workout_type: Optional[str]
     temperature_c: Optional[float]
@@ -61,13 +61,19 @@ async def list_activities(
 ):
     offset = (page - 1) * size
     total_result = await db.execute(
-        select(func.count()).select_from(Activity).where(Activity.user_id == current_user.id)
+        select(func.count()).select_from(Activity).where(
+            Activity.user_id == current_user.id,
+            Activity.review_status != "deleted",
+        )
     )
     total = total_result.scalar_one()
 
     result = await db.execute(
         select(Activity)
-        .where(Activity.user_id == current_user.id)
+        .where(
+            Activity.user_id == current_user.id,
+            Activity.review_status != "deleted",
+        )
         .order_by(Activity.date.desc())
         .offset(offset)
         .limit(size)

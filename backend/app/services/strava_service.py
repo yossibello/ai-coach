@@ -56,8 +56,13 @@ async def exchange_strava_code(user: User, code: str, db) -> None:
 
 async def _refresh_token_if_needed(user: User, db) -> str:
     """Return a valid access token, refreshing if expired."""
-    if user.strava_token_expires_at and user.strava_token_expires_at > datetime.now(timezone.utc):
-        return user.strava_access_token  # type: ignore
+    expires = user.strava_token_expires_at
+    if expires is not None:
+        # SQLite returns naive datetimes; make them UTC-aware for comparison
+        if expires.tzinfo is None:
+            expires = expires.replace(tzinfo=timezone.utc)
+        if expires > datetime.now(timezone.utc):
+            return user.strava_access_token  # type: ignore
 
     async with aiohttp.ClientSession() as session:
         async with session.post(
@@ -89,6 +94,19 @@ async def sync_strava_history(
     from app.services.metrics_service import compute_activity_metrics, _score_and_tag
 
     token = await _refresh_token_if_needed(user, db)
+
+    # _refresh_token_if_needed flushes the user row, which expires ORM attributes.
+    # Re-fetch user+profile so compute_activity_metrics can access user.profile
+    # synchronously (without triggering a lazy load that would fail outside greenlet).
+    from sqlalchemy import select as sa_select_user
+    from sqlalchemy.orm import selectinload as _selectinload
+    _result = await db.execute(
+        sa_select_user(User).where(User.id == user.id).options(
+            _selectinload(User.profile)
+        )
+    )
+    user = _result.scalar_one()
+
     headers = {"Authorization": f"Bearer {token}"}
 
     page = 1
@@ -96,14 +114,23 @@ async def sync_strava_history(
     total_fetched = 0
     all_activities: list[dict] = []
 
+    timeout = aiohttp.ClientTimeout(total=60)
+
     # Paginate through all activities
-    async with aiohttp.ClientSession(headers=headers) as session:
+    async with aiohttp.ClientSession(headers=headers, timeout=timeout) as session:
         while True:
             async with session.get(
                 f"{STRAVA_API_BASE}/athlete/activities",
-                params={"page": page, "per_page": per_page, "type": "Ride"},
+                params={"page": page, "per_page": per_page},
             ) as resp:
+                if resp.status != 200:
+                    text = await resp.text()
+                    raise RuntimeError(f"Strava API error {resp.status}: {text[:200]}")
                 batch = await resp.json()
+
+            # Strava returns an error dict on auth failure — must be a list
+            if not isinstance(batch, list):
+                raise RuntimeError(f"Unexpected Strava response: {batch}")
 
             if not batch:
                 break
@@ -118,11 +145,16 @@ async def sync_strava_history(
                 break
             page += 1
 
-    # Upsert
-    for i, sa in enumerate(all_activities):
-        if progress_callback:
-            progress_callback(i, total_fetched)
+    # Upsert — only process Ride/VirtualRide sport types
+    ride_types = {"Ride", "VirtualRide", "MountainBikeRide", "GravelRide", "EBikeRide"}
+    cycling = [a for a in all_activities if a.get("sport_type") in ride_types or a.get("type") in ride_types]
+    total_cycling = len(cycling)
 
+    if progress_callback:
+        progress_callback(0, total_cycling)
+
+    inserted = 0
+    for i, sa in enumerate(cycling):
         ext_id = str(sa["id"])
         result = await db.execute(
             sa_select(Activity).where(
@@ -131,15 +163,31 @@ async def sync_strava_history(
             )
         )
         existing = result.scalar_one_or_none()
-        if existing:
-            continue  # Skip duplicates
+        if not existing:
+            activity = _strava_to_activity(sa, user.id)
+            compute_activity_metrics(activity, user)
+            _score_and_tag(activity, user)
+            db.add(activity)
+            inserted += 1
 
-        activity = _strava_to_activity(sa, user.id)
-        compute_activity_metrics(activity, user)
-        _score_and_tag(activity, user)
-        db.add(activity)
+        if progress_callback:
+            progress_callback(i + 1, total_cycling)
 
     await db.flush()
+
+    # Rebuild Performance Management Chart (CTL/ATL/TSB) from all activities
+    from app.services.metrics_service import compute_pmc_for_user
+    await compute_pmc_for_user(user.id, db)
+
+    # Force-refresh the coach recommendation so it uses the new activity data
+    from app.ml.inference import generate_recommendation
+    from app.models.recommendation import Recommendation
+    try:
+        rec = await generate_recommendation(user, db)
+        db.add(rec)
+        await db.flush()
+    except Exception:
+        pass  # recommendation refresh is best-effort; don't fail the sync
 
 
 def _strava_to_activity(sa: dict[str, Any], user_id: str) -> Activity:

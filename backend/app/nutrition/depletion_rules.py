@@ -134,7 +134,7 @@ def compute_signals(
     if climate in ("northern_winter", "indoor_only"):
         s["winter_indoor_training"] = 0.8
 
-    if profile.get("recent_illness_count_3m", 0) >= 2:
+    if (profile.get("recent_illness_count_3m") or 0) >= 2:
         s["frequent_illness"] = 0.8
 
     # ── Safety signal ────────────────────────────────────────────────────────

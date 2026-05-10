@@ -28,8 +28,19 @@ def encode_activity(
     atl: float,
     tsb: float,
     days_since_last: int,
+    *,
+    hrv_z: float = 0.0,
+    rhr_delta: float = 0.0,
+    sleep_score: float = 50.0,
+    body_battery: float = 50.0,
 ) -> np.ndarray:
-    """ORM Activity → 1-D float32 vector of length ACTIVITY_DIM."""
+    """ORM Activity → 1-D float32 vector of length ACTIVITY_DIM.
+
+    Health params (HRV z-score, RHR delta, sleep score, body battery) are
+    optional kwargs — the caller is expected to look them up from HealthMetric
+    on the activity's date. Defaults centre each signal in its bound, which
+    is equivalent to telling the model "no health data available".
+    """
     ftp = (profile.ftp if profile and profile.ftp else 200) or 200
     max_hr = (profile.max_hr if profile and profile.max_hr else 190) or 190
     resting_hr = (profile.resting_hr if profile and profile.resting_hr else 55) or 55
@@ -56,6 +67,11 @@ def encode_activity(
         "wind_speed_kmh": act.wind_speed_kmh,
         "perceived_exertion": act.perceived_exertion,
         "workout_type": act.workout_type,
+        # Health & recovery (passed through to encoder via act dict)
+        "hrv_z": hrv_z,
+        "rhr_delta": rhr_delta,
+        "sleep_score": sleep_score,
+        "body_battery": body_battery,
     }
     return encode_activity_row(
         raw, ftp=ftp, max_hr_athlete=max_hr, resting_hr=resting_hr,

@@ -55,6 +55,13 @@ ACTIVITY_FEATURES = [
     "wt_race", "wt_long_ride",
     # Perceived exertion / notes
     "rpe_norm",
+    # ── Health & recovery (Garmin daily wellness on the day of the ride) ──
+    # Plews & Buchheit 2013 (HRV-guided), Buchheit 2014 (RHR + HRV combined),
+    # Stanley et al. 2013 (HR recovery time-courses).
+    "hrv_z_norm",         # z-score of overnight HRV vs 7d baseline, mapped to [0,1]
+    "rhr_delta_norm",     # delta vs 30d baseline RHR, mapped to [0,1]
+    "sleep_score_norm",   # Garmin sleep score 0–100 → [0,1]
+    "body_battery_norm",  # Garmin body battery 0–100 → [0,1]
 ]
 
 ACTIVITY_DIM = len(ACTIVITY_FEATURES)  # ~46

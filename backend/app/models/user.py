@@ -1,7 +1,7 @@
 import uuid
 from datetime import datetime, timezone
 
-from sqlalchemy import String, Boolean, DateTime, func
+from sqlalchemy import String, Boolean, DateTime, ForeignKey, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from sqlalchemy.dialects.postgresql import UUID
 
@@ -24,9 +24,14 @@ class User(Base):
     strava_refresh_token: Mapped[str | None] = mapped_column(String, nullable=True)
     strava_token_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
-    # Garmin OAuth
+    # Garmin OAuth (official Health API) — populated when partner credentials available.
     garmin_access_token: Mapped[str | None] = mapped_column(String, nullable=True)
     garmin_refresh_token: Mapped[str | None] = mapped_column(String, nullable=True)
+    # Garmin Connect username (used by the python-garminconnect dev fallback).
+    garmin_username: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    # Encrypted Garmin Connect password (Fernet, dev-only path).  NEVER store plaintext.
+    garmin_password_enc: Mapped[str | None] = mapped_column(String, nullable=True)
+    garmin_user_id: Mapped[str | None] = mapped_column(String, nullable=True)
 
     # ── ML / training participation ───────────────────────────────────────────
     # User consent: may we use their (anonymized) rides to retrain the community model?
@@ -56,6 +61,10 @@ class User(Base):
     def strava_connected(self) -> bool:
         return self.strava_athlete_id is not None
 
+    @property
+    def garmin_connected(self) -> bool:
+        return bool(self.garmin_access_token or self.garmin_username)
+
 
 class AthleteProfile(Base):
     __tablename__ = "athlete_profiles"
@@ -65,6 +74,7 @@ class AthleteProfile(Base):
     )
     user_id: Mapped[str] = mapped_column(
         UUID(as_uuid=False),
+        ForeignKey("users.id", ondelete="CASCADE"),
         nullable=False,
         index=True,
     )

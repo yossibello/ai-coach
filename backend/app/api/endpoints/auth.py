@@ -48,9 +48,10 @@ async def signup(body: SignupRequest, db: AsyncSession = Depends(get_db)):
         name=body.name,
         hashed_password=hash_password(body.password),
     )
-    # Create empty profile
-    profile = AthleteProfile(user_id=user.id)
     db.add(user)
+    await db.flush()  # populate user.id before linking profile
+
+    profile = AthleteProfile(user_id=user.id)
     db.add(profile)
     await db.flush()
 

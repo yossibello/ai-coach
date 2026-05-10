@@ -1,7 +1,7 @@
 from fastapi import APIRouter, Depends
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, desc
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 from typing import Any
 
 from app.core.database import get_db
@@ -14,6 +14,8 @@ router = APIRouter()
 
 
 class RecommendationOut(BaseModel):
+    model_config = ConfigDict(protected_namespaces=())
+
     id: str
     generated_at: str
     confidence: float
@@ -66,6 +68,8 @@ async def refresh_recommendation(
 
 # ── Multi-horizon: 3 alternative recommendations side-by-side ────────────────
 class MultiHorizonOut(BaseModel):
+    model_config = ConfigDict(protected_namespaces=())
+
     """
     Three alternative "next workout" suggestions, one per planning horizon:
       • short  — best for 7-day FTP gain

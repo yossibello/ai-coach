@@ -194,7 +194,21 @@ function SupplementCard({ item }: { item: SupplementItem }) {
   const [expanded, setExpanded] = useState(false);
   const qc = useQueryClient();
   const logIt = useMutation({
-    mutationFn: () => trackingAPI.createIntakeFromRecommendation(item.supplement_key),
+    mutationFn: async () => {
+      try {
+        return await trackingAPI.createIntakeFromRecommendation(item.supplement_key);
+      } catch {
+        // Fallback: log directly with item data (works even without a saved recommendation)
+        return await trackingAPI.createIntake({
+          supplement_key: item.supplement_key,
+          label: item.label,
+          dose: item.dose,
+          dose_unit: item.dose_unit,
+          frequency: item.frequency,
+          timing: item.timing,
+        });
+      }
+    },
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["intakes"] });
       toast.success(`Logged: ${item.label}`);

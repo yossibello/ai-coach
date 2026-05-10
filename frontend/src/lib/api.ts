@@ -60,6 +60,9 @@ export const authAPI = {
 // ─── Strava ──────────────────────────────────────────────────────────────────
 
 export const stravaAPI = {
+  status: () =>
+    api.get<{ connected: boolean; athlete_id: string | null }>("/api/v1/strava/status").then((r) => r.data),
+
   getAuthURL: () =>
     api.get<{ url: string }>("/api/v1/strava/auth-url").then((r) => r.data.url),
 
@@ -75,14 +78,20 @@ export const stravaAPI = {
     ).then((r) => r.data),
 
   disconnect: () => api.delete("/api/v1/strava/disconnect"),
+
+  estimateFTP: () =>
+    api.post<{ estimated_ftp: number | null; previous_ftp: number | null; updated: boolean; message: string }>("/api/v1/strava/estimate-ftp").then((r) => r.data),
+
+  rebuildPMC: () =>
+    api.post("/api/v1/strava/rebuild-pmc").then((r) => r.data),
 };
 
 // ─── Activities ──────────────────────────────────────────────────────────────
 
 export const activitiesAPI = {
-  list: (page = 1, size = 20) =>
+  list: (params: { page?: number; limit?: number; search?: string } = {}) =>
     api.get<PaginatedResponse<Activity>>("/api/v1/activities", {
-      params: { page, size },
+      params: { page: params.page ?? 1, size: params.limit ?? 20, search: params.search },
     }).then((r) => r.data),
 
   get: (id: string) =>
@@ -137,6 +146,69 @@ export const profileAPI = {
 
   update: (data: Partial<AthleteProfile>) =>
     api.put<AthleteProfile>("/api/v1/profile", data).then((r) => r.data),
+};
+
+// ─── Garmin ──────────────────────────────────────────────────────────────────
+
+export const garminAPI = {
+  status: () =>
+    api.get<{ connected: boolean; username: string | null; method: string }>(
+      "/api/v1/garmin/status"
+    ).then((r) => r.data),
+
+  connectCredentials: (username: string, password: string) =>
+    api.post<{ status: string; username: string }>(
+      "/api/v1/garmin/connect",
+      { username, password }
+    ).then((r) => r.data),
+
+  disconnect: () => api.delete("/api/v1/garmin/disconnect").then((r) => r.data),
+
+  sync: (days = 60) =>
+    api.post<{ task_id: string }>(`/api/v1/garmin/sync?days=${days}`).then((r) => r.data),
+
+  syncStatus: (taskId: string) =>
+    api.get<{ status: string; progress: number; total: number; stats: Record<string, number> | null; error: string | null }>(
+      `/api/v1/garmin/sync-status/${taskId}`
+    ).then((r) => r.data),
+};
+
+// ─── Health (HRV / RHR / Sleep / Body Battery / Readiness) ──────────────────
+
+export interface HealthDay {
+  date: string;
+  sleep_total_seconds: number | null;
+  sleep_score: number | null;
+  hrv_overnight_avg_ms: number | null;
+  hrv_7d_avg_ms: number | null;
+  hrv_status: string | null;
+  resting_hr: number | null;
+  body_battery_high: number | null;
+  body_battery_low: number | null;
+  stress_avg: number | null;
+}
+
+export interface Readiness {
+  score: number;
+  status: "green" | "amber" | "red";
+  hrv_z: number | null;
+  rhr_delta: number | null;
+  sleep_score: number | null;
+  body_battery: number | null;
+  hrv_score: number | null;
+  rhr_score: number | null;
+  drivers: string[];
+  advice: string;
+}
+
+export const healthAPI = {
+  recent: (days = 30) =>
+    api.get<{ days: HealthDay[]; readiness: Readiness }>(
+      `/api/v1/health/recent?days=${days}`
+    ).then((r) => r.data),
+
+  readiness: () =>
+    api.get<Readiness>("/api/v1/health/readiness").then((r) => r.data),
 };
 
 // ─── Nutrition / Supplements ─────────────────────────────────────────────────

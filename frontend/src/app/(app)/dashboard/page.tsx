@@ -1,15 +1,19 @@
 "use client";
 
-import { useQuery } from "@tanstack/react-query";
-import { fitnessAPI, activitiesAPI, coachAPI } from "@/lib/api";
+import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import { fitnessAPI, activitiesAPI, coachAPI, stravaAPI } from "@/lib/api";
 import { FitnessChart } from "@/components/dashboard/FitnessChart";
 import { MetricCard } from "@/components/dashboard/MetricCard";
 import { RecentActivities } from "@/components/dashboard/RecentActivities";
 import { CoachTip } from "@/components/dashboard/CoachTip";
+import { HealthWidget } from "@/components/dashboard/HealthWidget";
 import { getTSBStatus, formatPower } from "@/lib/utils";
-import { TrendingUp, Zap, Heart, Activity } from "lucide-react";
+import { TrendingUp, Zap, Heart, Activity, RefreshCw, Sparkles } from "lucide-react";
+import { toast } from "react-hot-toast";
 
 export default function DashboardPage() {
+  const qc = useQueryClient();
+
   const { data: fitness } = useQuery({
     queryKey: ["fitness"],
     queryFn: () => fitnessAPI.getProgression(16),
@@ -17,12 +21,30 @@ export default function DashboardPage() {
 
   const { data: activities } = useQuery({
     queryKey: ["activities", 1],
-    queryFn: () => activitiesAPI.list(1, 5),
+    queryFn: () => activitiesAPI.list({ page: 1, limit: 5 }),
   });
 
   const { data: coach } = useQuery({
     queryKey: ["coach-recommendation"],
     queryFn: () => coachAPI.getRecommendation(),
+  });
+
+  const refreshRec = useMutation({
+    mutationFn: () => coachAPI.refreshRecommendation(),
+    onSuccess: (data) => {
+      qc.setQueryData(["coach-recommendation"], data);
+      toast.success("Recommendation refreshed");
+    },
+    onError: () => toast.error("Could not refresh recommendation"),
+  });
+
+  const estimateFTP = useMutation({
+    mutationFn: () => stravaAPI.estimateFTP(),
+    onSuccess: (data) => {
+      qc.invalidateQueries({ queryKey: ["fitness"] });
+      toast.success(data.message);
+    },
+    onError: () => toast.error("Could not estimate FTP"),
   });
 
   const current = fitness?.current;
@@ -31,9 +53,31 @@ export default function DashboardPage() {
   return (
     <div className="p-6 space-y-6 animate-fade-in">
       {/* Header */}
-      <div>
-        <h1 className="text-2xl font-bold text-white">Dashboard</h1>
-        <p className="text-slate-400 text-sm mt-1">Your training at a glance</p>
+      <div className="flex items-start justify-between gap-4">
+        <div>
+          <h1 className="text-2xl font-bold text-white">Dashboard</h1>
+          <p className="text-slate-400 text-sm mt-1">Your training at a glance</p>
+        </div>
+        <div className="flex gap-2 flex-shrink-0">
+          <button
+            onClick={() => estimateFTP.mutate()}
+            disabled={estimateFTP.isPending}
+            title="Auto-detect FTP from your best power on long rides"
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium bg-surface-card border border-surface-border text-slate-300 hover:text-white disabled:opacity-50"
+          >
+            <Sparkles className={`w-3.5 h-3.5 text-brand-400 ${estimateFTP.isPending ? "animate-pulse" : ""}`} />
+            Estimate FTP
+          </button>
+          <button
+            onClick={() => refreshRec.mutate()}
+            disabled={refreshRec.isPending}
+            title="Re-run the AI model with your latest data"
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium bg-surface-card border border-surface-border text-slate-300 hover:text-white disabled:opacity-50"
+          >
+            <RefreshCw className={`w-3.5 h-3.5 ${refreshRec.isPending ? "animate-spin" : ""}`} />
+            Refresh AI
+          </button>
+        </div>
       </div>
 
       {/* Metric cards */}
@@ -70,6 +114,9 @@ export default function DashboardPage() {
 
       {/* Coach tip */}
       {coach && <CoachTip recommendation={coach} />}
+
+      {/* Recovery & Readiness (HRV / RHR / Sleep / Body Battery) */}
+      <HealthWidget />
 
       {/* PMC Chart */}
       <div className="bg-surface-card border border-surface-border rounded-2xl p-6">

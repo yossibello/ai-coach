@@ -199,6 +199,15 @@ class Athlete:
     start_date: datetime
     ctl: float = 0.0
     atl: float = 0.0
+    # ── Health/recovery state (updated daily) ────────────────────────────
+    # Plews & Buchheit (2013): each athlete has an individual HRV baseline
+    # (in ms) that drifts slowly with fitness. Day-to-day RMSSD oscillates
+    # around it under autonomic load.
+    hrv_baseline: float = 50.0     # rolling mean of overnight RMSSD (ms)
+    hrv_today: float = 50.0
+    rhr_today: int = 55            # today's resting HR
+    sleep_score_today: float = 75.0
+    body_battery_today: float = 80.0
 
 
 def _make_athlete(rng: np.random.Generator, athlete_id: int) -> Athlete:
@@ -230,6 +239,14 @@ def _make_athlete(rng: np.random.Generator, athlete_id: int) -> Athlete:
     start_date = datetime(2021, 1, 1) + timedelta(days=int(rng.integers(0, 365 * 4)))
     ctl = float(rng.uniform(8, 45))
 
+    # Initial HRV baseline scales with fitness/recovery (typical 30–120 ms RMSSD).
+    # Trained endurance athletes sit higher; older athletes lower
+    # (Plews & Buchheit 2013, Aubert et al. 2003).
+    hrv_baseline = float(np.clip(
+        70 - 0.4 * age + 4.0 * exp + rng.normal(0, 8),
+        25, 130,
+    ))
+
     return Athlete(
         athlete_id=athlete_id,
         age=age, weight=weight, height=height, sex=sex,
@@ -241,6 +258,11 @@ def _make_athlete(rng: np.random.Generator, athlete_id: int) -> Athlete:
         n_weeks=n_weeks, event_week=event_week,
         start_date=start_date,
         ctl=ctl, atl=ctl * float(rng.uniform(0.85, 1.15)),
+        hrv_baseline=hrv_baseline,
+        hrv_today=hrv_baseline,
+        rhr_today=resting_hr,
+        sleep_score_today=75.0,
+        body_battery_today=80.0,
     )
 
 
@@ -253,11 +275,104 @@ def _phase(week: int, event_week: int) -> str:
     return "base"
 
 
+# ── HRV / RHR / sleep / body-battery simulation ───────────────────────────────
+# Implements an autonomic-recovery model based on:
+#   • Plews & Buchheit (2013) — Ln(RMSSD) drops with sympathetic dominance and
+#     fluctuates ~5–15 ms day to day around an individual baseline.
+#   • Stanley, Peake & Buchheit (2013) — HR recovery time-courses by intensity:
+#     Z1/Z2 < 24h, threshold 24–48h, VO2max/race 48–72h.
+#   • Buchheit (2014) — RHR rises 3–10 bpm with accumulated fatigue; returns
+#     to baseline with rest.
+#   • Vesterinen et al. (2016) — fitter athletes have higher Ln(RMSSD) baselines.
+# Returned values are RAW (ms / bpm / 0–100) so the encoder will normalize.
+
+# Per-workout autonomic stress (relative units; calibrated against
+# Stanley 2013 figure 1 recovery curves).
+_AUTO_STRESS = {
+    "recovery":  0.10,
+    "easy":      0.20,
+    "endurance": 0.40,
+    "tempo":     0.65,
+    "sweetspot": 0.75,
+    "threshold": 1.00,
+    "vo2max":    1.30,
+    "sprint":    0.95,
+    "race":      1.50,
+    "long_ride": 0.85,
+}
+
+
+def _simulate_health_for_day(
+    athlete: Athlete,
+    rng: np.random.Generator,
+    yesterday_workout: str | None,
+    yesterday_tss: float,
+    days_since_hard: int,
+    atl: float,
+    ctl: float,
+) -> tuple[float, int, float, float]:
+    """
+    Simulate today's morning health metrics BEFORE today's ride. Returns
+    (hrv_overnight_ms, rhr_bpm, sleep_score, body_battery_high).
+
+    Updates `athlete.hrv_baseline` slowly (≈0.1× exponential blend) so the
+    7-day rolling baseline behaviour matches Plews & Buchheit's smoothing.
+    """
+    # Acute autonomic stress from yesterday's ride (decays exponentially).
+    stress = _AUTO_STRESS.get(yesterday_workout or "easy", 0.0) if yesterday_workout else 0.0
+    # Decay across days since last hard session (Stanley 2013).
+    decay = math.exp(-days_since_hard / 1.8)
+    acute = stress * decay
+
+    # Chronic fatigue contribution from ATL/CTL ratio (Buchheit 2014).
+    chronic = max(0.0, (atl - ctl) / max(ctl, 20.0))
+    chronic = min(chronic, 1.5)
+
+    # Drift HRV baseline upward with fitness, downward with chronic fatigue.
+    fitness_pull = 0.005 * (40 - (athlete.hrv_baseline - 50))   # very slow regression to mean
+    fatigue_pull = -0.4 * chronic
+    athlete.hrv_baseline = float(np.clip(
+        athlete.hrv_baseline + fitness_pull + fatigue_pull + rng.normal(0, 0.5),
+        20.0, 140.0,
+    ))
+
+    # Today's overnight HRV: baseline × (1 - acute_drop) × noise
+    acute_drop = 0.18 * acute + 0.10 * chronic
+    noise = rng.normal(1.0, 0.07)
+    hrv_today = float(np.clip(
+        athlete.hrv_baseline * (1 - acute_drop) * noise,
+        10.0, 160.0,
+    ))
+
+    # Resting HR delta (Buchheit 2014): up with acute + chronic load.
+    rhr_bump = 4.0 * acute + 3.0 * chronic + rng.normal(0, 1.5)
+    rhr_today = int(np.clip(athlete.resting_hr + rhr_bump, 32, 95))
+
+    # Sleep score: degrades with stress; baseline ~ 75.
+    sleep_score = float(np.clip(
+        82 - 12 * acute - 8 * chronic + rng.normal(0, 7),
+        20.0, 100.0,
+    ))
+
+    # Body Battery: starts ~ 90, drained by stress + poor sleep.
+    body_battery = float(np.clip(
+        92 - 25 * acute - 18 * chronic + (sleep_score - 75) * 0.3 + rng.normal(0, 5),
+        5.0, 100.0,
+    ))
+
+    return hrv_today, rhr_today, sleep_score, body_battery
+
+
 # ── Simulate a single ride: produce RAW values ────────────────────────────────
 def _simulate_ride(
     wt: str, athlete: Athlete, rng: np.random.Generator,
     date: datetime, days_since_last: int,
     ctl: float, atl: float,
+    *,
+    hrv_today: float = None,
+    rhr_today: int = None,
+    sleep_score: float = 75.0,
+    body_battery: float = 80.0,
 ) -> tuple[dict, float]:
     """Return (raw_dict, tss). raw_dict keys match the synthetic parquet schema."""
     T = TEMPLATES[wt]
@@ -266,6 +381,18 @@ def _simulate_ride(
     tsb = ctl - atl
     fatigue_penalty = max(0.0, -tsb / 120)  # up to 5% penalty when TSB=-60
     raw_if = max(0.3, raw_if * (1 - fatigue_penalty * 0.05))
+
+    # ── Health-driven intensity penalty ─────────────────────────────────
+    # When HRV is suppressed or RHR elevated, the same nominal IF "costs"
+    # more — and athletes self-regulate down. Plews & Buchheit (2013) show
+    # ≈5–10% reduction in tolerable workload on low-HRV days.
+    if hrv_today is not None and hrv_today > 0:
+        hrv_drop_pct = max(0.0, (athlete.hrv_baseline - hrv_today) / max(athlete.hrv_baseline, 1))
+        raw_if *= (1 - 0.10 * min(hrv_drop_pct, 0.5))
+    if rhr_today is not None:
+        rhr_delta = rhr_today - athlete.resting_hr
+        if rhr_delta > 5:
+            raw_if *= (1 - 0.005 * min(rhr_delta - 5, 10))
 
     dur_h    = float(rng.uniform(*T["dur_h"]))
     avg_pwr  = raw_if * athlete.ftp
@@ -361,6 +488,18 @@ def _simulate_ride(
         "experience_years":      athlete.experience,
         "primary_goal":          athlete.goal,
         "days_to_event":         max(0.0, (athlete.event_week - (date - athlete.start_date).days / 7.0)) * 7.0,
+        # ── Health & recovery (raw values + derived z-score / delta) ────
+        "hrv_overnight_ms":      hrv_today if hrv_today is not None else athlete.hrv_baseline,
+        "hrv_z":                 (
+            (hrv_today - athlete.hrv_baseline) / max(athlete.hrv_baseline * 0.10, 1.0)
+            if hrv_today is not None else 0.0
+        ),
+        "rhr_bpm":               rhr_today if rhr_today is not None else athlete.resting_hr,
+        "rhr_delta":             (
+            float(rhr_today - athlete.resting_hr) if rhr_today is not None else 0.0
+        ),
+        "sleep_score":           sleep_score,
+        "body_battery":          body_battery,
     }
     return raw, tss
 
@@ -426,6 +565,10 @@ def _simulate_athlete(
     date = athlete.start_date
     days_since_last = 3
 
+    yesterday_workout: str | None = None
+    yesterday_tss = 0.0
+    days_since_hard = 7
+
     for week_num in range(athlete.n_weeks):
         phase = _phase(week_num, athlete.event_week)
 
@@ -439,6 +582,7 @@ def _simulate_athlete(
             ctl *= (1 - 2 / 43)
             atl *= (1 - 2 / 8)
             days_since_last += 7
+            days_since_hard += 7
             continue
 
         schedule_options = SCHEDULES[athlete.philosophy].get(
@@ -459,8 +603,22 @@ def _simulate_athlete(
 
         for i, wt in enumerate(weekly_wts):
             ride_date = date + timedelta(days=int(spread_days[i]))
+
+            # Compute today's morning health BEFORE the ride.
+            hrv_today, rhr_today, sleep_score, body_battery = _simulate_health_for_day(
+                athlete, rng,
+                yesterday_workout=yesterday_workout,
+                yesterday_tss=yesterday_tss,
+                days_since_hard=days_since_hard,
+                atl=atl, ctl=ctl,
+            )
+
             row, tss = _simulate_ride(
-                wt, athlete, rng, ride_date, days_since_last, ctl, atl
+                wt, athlete, rng, ride_date, days_since_last, ctl, atl,
+                hrv_today=hrv_today,
+                rhr_today=rhr_today,
+                sleep_score=sleep_score,
+                body_battery=body_battery,
             )
 
             alpha_ctl = 2 / 43
@@ -470,6 +628,12 @@ def _simulate_athlete(
 
             week_tss_by_type[wt] = week_tss_by_type.get(wt, 0) + tss
             days_since_last = 1
+            yesterday_workout = wt
+            yesterday_tss = tss
+            if wt in ("threshold", "vo2max", "race", "sprint", "sweetspot"):
+                days_since_hard = 0
+            else:
+                days_since_hard += 1
             rows.append(row)
 
         # End-of-week FTP adaptation

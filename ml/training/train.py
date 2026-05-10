@@ -40,6 +40,7 @@ import os
 import pandas as pd
 import torch
 import torch.nn as nn
+from torch.amp import GradScaler, autocast
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import CosineAnnealingLR
 from torch.utils.data import DataLoader
@@ -55,6 +56,8 @@ def train(args):
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Training on: {device}")
+    if device.type == "cuda":
+        print(f"  GPU: {torch.cuda.get_device_name(0)}  VRAM: {torch.cuda.get_device_properties(0).total_memory / 1e9:.1f} GB")
 
     # ── Load data ─────────────────────────────────────────────────────────
     print(f"Loading data from {args.data}…")
@@ -69,21 +72,24 @@ def train(args):
     val_ds   = CyclingDataset(df, seq_len=args.seq_len, athlete_ids=val_ids)
     print(f"Train sequences: {len(train_ds):,}  Val sequences: {len(val_ds):,}")
 
+    n_workers_train = min(4, n_threads) if device.type == "cuda" else min(2, n_threads)
+    n_workers_val   = min(2, n_threads) if device.type == "cuda" else min(1, n_threads)
     train_loader = DataLoader(
         train_ds,
         batch_size=args.batch_size,
         shuffle=True,
         collate_fn=collate_fn,
-        num_workers=min(4, n_threads),
+        num_workers=n_workers_train,
         pin_memory=device.type == "cuda",
-        persistent_workers=False,
+        persistent_workers=n_workers_train > 0,
     )
     val_loader = DataLoader(
         val_ds,
         batch_size=args.batch_size,
         shuffle=False,
         collate_fn=collate_fn,
-        num_workers=min(2, n_threads),
+        num_workers=n_workers_val,
+        persistent_workers=n_workers_val > 0,
     )
 
     # ── Model ─────────────────────────────────────────────────────────────
@@ -102,6 +108,10 @@ def train(args):
         dropout=args.dropout,
     ).to(device)
 
+    if args.compile and device.type == "cuda" and hasattr(torch, "compile"):
+        print("Compiling model with torch.compile…")
+        model = torch.compile(model)
+
     if args.checkpoint and os.path.exists(args.checkpoint):
         state = torch.load(args.checkpoint, map_location=device)
         model.load_state_dict(state)
@@ -111,13 +121,19 @@ def train(args):
     print(f"Model parameters: {total_params:,}")
 
     # ── Optimizer / Scheduler / Losses ────────────────────────────────────
-    optimizer = AdamW(model.parameters(), lr=args.lr, weight_decay=1e-4)
-    scheduler = CosineAnnealingLR(optimizer, T_max=args.epochs, eta_min=1e-6)
+    optimizer  = AdamW(model.parameters(), lr=args.lr, weight_decay=1e-4)
+    scheduler  = CosineAnnealingLR(optimizer, T_max=args.epochs, eta_min=1e-6)
+    scaler     = GradScaler(device=device.type, enabled=device.type == "cuda" and not args.no_amp)
     ce_loss    = nn.CrossEntropyLoss(label_smoothing=0.1)
     mse_loss   = nn.MSELoss()
     huber_loss = nn.HuberLoss(delta=10.0)
 
-    best_val_loss = math.inf
+    use_amp = device.type == "cuda" and not args.no_amp
+    if use_amp:
+        print("Automatic Mixed Precision (AMP) enabled")
+
+    best_val_loss  = math.inf
+    patience_count = 0
     os.makedirs(os.path.dirname(args.output) or ".", exist_ok=True)
 
     # ── Training loop ─────────────────────────────────────────────────────
@@ -136,17 +152,21 @@ def train(args):
             tgt_ftp = batch["ftp_delta"].to(device)
 
             optimizer.zero_grad()
-            out = model(x, di, pm)
+            with autocast(device_type=device.type, enabled=use_amp):
+                out = model(x, di, pm)
 
-            loss_wt  = ce_loss(out["workout_logits"], tgt_wt)
-            loss_if  = mse_loss(out["intensity"].squeeze(-1), tgt_if)
-            loss_dur = mse_loss(out["duration"].squeeze(-1), tgt_dur)
-            loss_ftp = huber_loss(out["ftp_delta"].squeeze(-1), tgt_ftp)
+                loss_wt  = ce_loss(out["workout_logits"], tgt_wt)
+                loss_if  = mse_loss(out["intensity"].squeeze(-1), tgt_if)
+                loss_dur = mse_loss(out["duration"].squeeze(-1), tgt_dur)
+                loss_ftp = huber_loss(out["ftp_delta"].squeeze(-1), tgt_ftp)
 
-            loss = loss_wt + 0.5 * loss_if + 0.3 * loss_dur + 0.05 * loss_ftp
-            loss.backward()
+                loss = loss_wt + 0.5 * loss_if + 0.3 * loss_dur + 0.05 * loss_ftp
+
+            scaler.scale(loss).backward()
+            scaler.unscale_(optimizer)
             nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-            optimizer.step()
+            scaler.step(optimizer)
+            scaler.update()
 
             train_loss += loss.item()
             n_train_batches += 1
@@ -202,9 +222,37 @@ def train(args):
         )
 
         if avg_val < best_val_loss:
-            best_val_loss = avg_val
-            torch.save(model.state_dict(), args.output)
+            best_val_loss  = avg_val
+            patience_count = 0
+            # Save state_dict + model config so inference can rebuild the
+            # exact same architecture (otherwise dim mismatches silently
+            # fall back to cold-start).
+            raw_model = model._orig_mod if hasattr(model, "_orig_mod") else model
+            ckpt = {
+                "state_dict": raw_model.state_dict(),
+                "config": {
+                    "input_dim": raw_model.input_proj[0].in_features,
+                    "d_model": d_model,
+                    "nhead": nhead,
+                    "num_layers": num_layers,
+                    "dim_feedforward": d_ff,
+                    "dropout": args.dropout,
+                },
+                "metrics": {
+                    "epoch": epoch,
+                    "val_loss": avg_val,
+                    "wt_acc": wt_acc,
+                    "if_mae": if_mae,
+                    "ftp_mae": ftp_mae,
+                },
+            }
+            torch.save(ckpt, args.output)
             print(f"  ✓ Saved best model → {args.output}")
+        else:
+            patience_count += 1
+            if args.patience > 0 and patience_count >= args.patience:
+                print(f"  Early stopping: val loss hasn't improved for {args.patience} epochs.")
+                break
 
     print(f"\nDone. Best val loss: {best_val_loss:.4f}")
 
@@ -227,5 +275,11 @@ if __name__ == "__main__":
     parser.add_argument("--dropout",    type=float, default=0.1)
     parser.add_argument("--fast",       action="store_true",
                         help="Smaller model for quick CPU testing")
+    parser.add_argument("--patience",   type=int, default=15,
+                        help="Early stopping: epochs without val improvement (0=disable)")
+    parser.add_argument("--compile",    action="store_true",
+                        help="Use torch.compile for extra GPU speed (PyTorch 2.0+)")
+    parser.add_argument("--no-amp",     action="store_true",
+                        help="Disable Automatic Mixed Precision even on GPU")
     args = parser.parse_args()
     train(args)

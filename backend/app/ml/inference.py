@@ -15,10 +15,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.user import User, AthleteProfile
 from app.models.activity import Activity
 from app.models.recommendation import Recommendation, FitnessMetric
+from app.models.health import HealthMetric
 from app.ml.cold_start import build_cold_start_recommendation
 from app.ml.features import encode_activity, encode_profile
 from app.ml.model import CyclingTransformer, INPUT_DIM, ACTIVITY_DIM, PROFILE_DIM
 from app.ml.norm import encode_profile_row
+from app.services.readiness import compute_readiness, per_day_health_features
 from app.core.config import settings
 
 COLD_START_THRESHOLD = 50   # activities required before using transformer
@@ -54,10 +56,26 @@ def _load_model() -> CyclingTransformer | None:
         return None
 
     try:
-        model = CyclingTransformer()
         state = torch.load(path, map_location="cpu")
-        model.load_state_dict(state)
+        # New checkpoint format: {"state_dict": ..., "config": {...}}
+        # Old format: raw state_dict (kwargs default to current model defaults)
+        if isinstance(state, dict) and "state_dict" in state:
+            cfg = dict(state.get("config", {}) or {})
+            sd = state["state_dict"]
+        else:
+            cfg = {}
+            sd = state
+        # Detect input_dim from the input projection layer so old checkpoints
+        # (trained before health features were added) still load. Slicing in
+        # _transformer_recommendation handles the feature-count mismatch.
+        proj_w = sd.get("input_proj.0.weight")
+        if proj_w is not None:
+            cfg["input_dim"] = int(proj_w.shape[1])
+        model = CyclingTransformer(**cfg)
+        model.load_state_dict(sd)
         model.eval()
+        # Stash for downstream slicing.
+        model._input_dim = cfg.get("input_dim", INPUT_DIM)
         _model = model
         return _model
     except Exception:
@@ -98,6 +116,21 @@ async def generate_recommendation(user: User, db: AsyncSession) -> Recommendatio
     atl = latest_metric.atl if latest_metric else 0.0
     tsb = latest_metric.tsb if latest_metric else 0.0
 
+    # Load health metrics (HRV / RHR / sleep / body battery) for the same window
+    # as activities + a 30-day prefix so HRV z-scores have a baseline.
+    health_cutoff = datetime.utcnow() - timedelta(days=120)
+    health_result = await db.execute(
+        sa_select(HealthMetric)
+        .where(
+            HealthMetric.user_id == user.id,
+            HealthMetric.date >= health_cutoff,
+        )
+        .order_by(HealthMetric.date)
+    )
+    health_metrics: list[HealthMetric] = list(health_result.scalars().all())
+    health_by_date = per_day_health_features(health_metrics)
+    readiness_snapshot = compute_readiness(health_metrics)
+
     recent_types = [a.workout_type for a in activities[-7:] if a.workout_type]
 
     # Count total activities
@@ -109,11 +142,101 @@ async def generate_recommendation(user: User, db: AsyncSession) -> Recommendatio
     model = _load_model()
 
     if total_activities >= COLD_START_THRESHOLD and model is not None:
-        payload = _transformer_recommendation(model, activities, profile, ctl, atl, tsb)
+        payload = _transformer_recommendation(model, activities, profile, ctl, atl, tsb,
+                                              health_by_date=health_by_date)
     else:
         payload = build_cold_start_recommendation(
             profile, ctl, atl, tsb, recent_types, total_activities
         )
+
+    # Attach readiness so the UI / safety guard can use it.
+    payload["readiness"] = {
+        "score": readiness_snapshot.score,
+        "status": readiness_snapshot.status,
+        "hrv_z": readiness_snapshot.hrv_z,
+        "rhr_delta": readiness_snapshot.rhr_delta,
+        "sleep_score": readiness_snapshot.sleep_score,
+        "body_battery": readiness_snapshot.body_battery,
+        "drivers": readiness_snapshot.drivers,
+        "advice": readiness_snapshot.advice,
+    }
+
+    # ── Hard safety pass: clamp duration / TSS / intensity to safe ranges ──
+    from app.safety.guards import apply_workout_safety, apply_weekly_plan_safety, apply_health_safety
+
+    # Estimate last-week TSS from recent activities for ramp guard.
+    # Activity dates from SQLite are naive; compare against a naive cutoff.
+    from datetime import timedelta
+    week_ago = datetime.utcnow() - timedelta(days=7)
+    def _naive(d):
+        return d.replace(tzinfo=None) if d and d.tzinfo else d
+    last_week_tss = sum(
+        (a.tss or 0) for a in activities if a.date and _naive(a.date) >= week_ago
+    )
+
+    safe_next, next_notes = apply_workout_safety(
+        payload.get("next_workout"), ctl=ctl, tsb=tsb
+    )
+    # Layer health-readiness override on top of TSB-based safety.
+    safe_next, health_notes = apply_health_safety(
+        safe_next, readiness=payload.get("readiness")
+    )
+    next_notes = next_notes + health_notes
+    payload["next_workout"] = safe_next
+
+    # ── Already-rode-today guard ────────────────────────────────────────────
+    # If the rider has a confirmed activity dated today, don't push another
+    # full workout for today — shift the suggestion to tomorrow.
+    today = datetime.utcnow().date()
+    today_acts = [a for a in activities if a.date and _naive(a.date).date() == today]
+    today_tss = sum((a.tss or 0.0) for a in today_acts)
+    today_dur_min = sum((a.duration_seconds or 0) for a in today_acts) / 60.0
+
+    if today_acts and safe_next is not None:
+        # Significant ride already done → shift to tomorrow as a rest/easy day
+        if today_tss >= 30 or today_dur_min >= 45:
+            safe_next["day_offset"] = 1
+            safe_next["already_rode_today"] = True
+            safe_next["today_tss"] = round(today_tss, 1)
+            safe_next["today_duration_minutes"] = int(today_dur_min)
+            existing_rationale = safe_next.get("rationale", "")
+            safe_next["rationale"] = (
+                f"You've already ridden today ({int(today_dur_min)} min, "
+                f"{int(today_tss)} TSS). Suggested workout moved to tomorrow. "
+                f"{existing_rationale}"
+            ).strip()
+            payload.setdefault("safety_notes", []).append(
+                f"Today's ride detected ({int(today_tss)} TSS) — next workout shifted to tomorrow."
+            )
+        else:
+            # Small spin already done — keep today but subtract its TSS from target
+            tgt = safe_next.get("target_tss")
+            if tgt:
+                safe_next["target_tss"] = max(15, int(tgt - today_tss))
+                safe_next["already_rode_today"] = True
+                safe_next["today_tss"] = round(today_tss, 1)
+                payload.setdefault("safety_notes", []).append(
+                    f"Light ride already done today ({int(today_tss)} TSS) — "
+                    f"target reduced accordingly."
+                )
+
+    safe_plan, plan_notes = apply_weekly_plan_safety(
+        payload.get("weekly_plan", []),
+        last_week_tss=last_week_tss,
+        ctl=ctl,
+        tsb=tsb,
+    )
+    # Keep weekly_plan[0] in sync with next_workout (safety guard may have
+    # returned a copy, so day_offset and other fields can diverge).
+    # Then renumber the rest of the plan sequentially after next_workout's day.
+    if safe_next is not None and safe_plan:
+        safe_plan[0] = safe_next
+        start = safe_next.get("day_offset", 0)
+        for i, w in enumerate(safe_plan[1:], start=1):
+            w["day_offset"] = start + i
+    payload["weekly_plan"] = safe_plan
+    if next_notes or plan_notes:
+        payload.setdefault("safety_notes", []).extend(next_notes + plan_notes)
 
     return Recommendation(
         user_id=user.id,
@@ -155,6 +278,8 @@ def _transformer_recommendation(
     atl: float,
     tsb: float,
     horizon_override_days: int | None = None,
+    *,
+    health_by_date: dict | None = None,
 ) -> dict:
     """Run the transformer and convert outputs to recommendation payload.
 
@@ -181,7 +306,27 @@ def _transformer_recommendation(
         prev_date = act.date
 
         _tsb = _ctl - _atl
-        act_vec = encode_activity(act, profile, _ctl, _atl, _tsb, days_since_last)
+
+        # Pull health context for this ride's date if available.
+        h_kwargs = {}
+        if health_by_date and act.date is not None:
+            tup = health_by_date.get(act.date.date())
+            if tup is not None:
+                h_kwargs = {
+                    "hrv_z": tup[0],
+                    "rhr_delta": tup[1],
+                    "sleep_score": tup[2],
+                    "body_battery": tup[3],
+                }
+
+        act_vec = encode_activity(act, profile, _ctl, _atl, _tsb, days_since_last, **h_kwargs)
+        # Backwards-compat: an older checkpoint trained without health features
+        # expects ACTIVITY_DIM-4 columns. Slice off the trailing health block
+        # so the input projection shape matches.
+        expected_input = getattr(model, "_input_dim", INPUT_DIM)
+        expected_act = expected_input - PROFILE_DIM
+        if act_vec.shape[0] > expected_act:
+            act_vec = act_vec[:expected_act]
         token = np.concatenate([act_vec, profile_vec])
         seq_features.append(token)
         day_indices.append(min(days_since, 1499))
@@ -385,6 +530,19 @@ async def generate_multi_horizon_recommendation(
     atl = latest_metric.atl if latest_metric else 0.0
     tsb = latest_metric.tsb if latest_metric else 0.0
 
+    # Load health history for per-day feature lookup (same as standard rec).
+    health_cutoff = datetime.utcnow() - timedelta(days=120)
+    health_result = await db.execute(
+        sa_select(HealthMetric)
+        .where(
+            HealthMetric.user_id == user.id,
+            HealthMetric.date >= health_cutoff,
+        )
+        .order_by(HealthMetric.date)
+    )
+    health_metrics: list[HealthMetric] = list(health_result.scalars().all())
+    health_by_date = per_day_health_features(health_metrics)
+
     count_result = await db.execute(
         sa_select(func.count()).select_from(Activity).where(Activity.user_id == user.id)
     )
@@ -427,6 +585,7 @@ async def generate_multi_horizon_recommendation(
         payload = _transformer_recommendation(
             model, activities, profile, ctl, atl, tsb,
             horizon_override_days=dte,
+            health_by_date=health_by_date,
         )
         payload["horizon"]              = label
         payload["horizon_days"]         = dte

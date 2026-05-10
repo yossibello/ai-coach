@@ -35,6 +35,9 @@ aiohttp==3.9.5
 requests==2.32.3
 requests-oauthlib==2.0.0
 
+# ─── Garmin Connect (dev path; unsupported by Garmin) ─────────────────────────
+garminconnect==0.2.20
+
 # ─── LLM text generation (optional) ───────────────────────────────────────────
 openai==1.30.1
 

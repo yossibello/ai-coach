@@ -46,7 +46,7 @@ services:
       ENVIRONMENT: ${ENVIRONMENT:-development}
     volumes:
       - ./backend:/app
-      - model_storage:/app/models
+      - ./backend/models:/app/models
       - file_storage:/app/uploads
     depends_on:
       postgres:
@@ -68,7 +68,7 @@ services:
       ML_MODEL_PATH: /app/models/cycling_coach.pt
     volumes:
       - ./backend:/app
-      - model_storage:/app/models
+      - ./backend/models:/app/models
       - file_storage:/app/uploads
     depends_on:
       postgres:
@@ -99,5 +99,4 @@ services:
 volumes:
   postgres_data:
   redis_data:
-  model_storage:
   file_storage:

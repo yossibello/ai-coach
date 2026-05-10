@@ -45,6 +45,12 @@ def compute_activity_metrics(activity: Activity, user: User | None) -> None:
         )
         activity.tss = round(raw_tss, 1)
 
+    # Fallback: use avg_power as proxy for NP when NP is not available
+    if not activity.tss and activity.avg_power and ftp and activity.duration_seconds:
+        if_ = activity.avg_power / ftp
+        activity.intensity_factor = round(if_, 3)
+        activity.tss = round((activity.duration_seconds / 3600) * (if_ ** 2) * 100, 1)
+
     # TSS from HR if no power (estimate using HR reserve)
     if not activity.tss and activity.avg_hr and user:
         profile = getattr(user, "profile", None)
@@ -131,37 +137,322 @@ def _classify_workout(if_: float, duration_s: int) -> str:
     return "sprint"
 
 
+async def estimate_ftp_from_activities(
+    user_id: str,
+    db: AsyncSession,
+    manual_ftp: int | None = None,
+) -> dict:
+    """
+    Multi-source, recency-weighted, robust FTP estimator.
+
+    Why this beats ZwiftPower's "best 20 min × 0.95"
+    ------------------------------------------------
+    ZwiftPower picks ONE peak effort and applies a fixed 0.95 multiplier.
+    That throws away most of the signal in your training history and is
+    sensitive to a single anomalous ride (a tailwind, a downhill segment,
+    a power-meter spike).
+
+    This estimator instead:
+      1. Derives a **per-ride FTP estimate** from many rides using
+         duration-aware physiology coefficients (Coggan / WKO-style).
+      2. Weights each estimate by (recency × duration confidence).
+      3. Uses a **weighted 75th-percentile** (not max, not mean) — robust
+         to outliers but representative of true threshold capability.
+      4. Applies a **TSB fatigue correction** (rides done tired
+         under-represent FTP).
+      5. Splits into "recent (30d)" and "older (30-180d)" buckets to
+         detect trend and slightly bias toward the more recent estimate
+         when the athlete is improving.
+      6. Reports a **confidence band** (low/high watts) from the spread
+         of contributing estimates.
+
+    Per-ride estimate coefficients (NP × coefficient → FTP):
+      duration ≥ 60 min  → NP × 1.00          (long hard effort, NP ≈ FTP)
+      duration ≥ 45 min  → NP × 0.97          (sub-hour, slight discount)
+      duration ≥ 20 min  → NP × 0.95          (classic 20-min test)
+      duration ≥  8 min  → NP × 0.90          (Carmichael 8-min)
+      otherwise → skip
+
+    No IF-based gating: any ride of sufficient duration with NP ≥ 80W
+    contributes (with appropriate confidence weight).  The robust 75th-
+    percentile then picks the rider's true threshold capability while
+    discarding casual recovery rides.
+
+    Rides without NP are skipped (no avg-power fallback, since avg power
+    on real rides under-estimates threshold capability badly).
+
+    Returns
+    -------
+    dict with:
+      estimated_ftp        – int (or None)
+      confidence           – 0-1 (effective sample size + recency)
+      confidence_low       – low end of 80% band
+      confidence_high      – high end of 80% band
+      best_ride_age_days   – age of newest contributing ride
+      tsb_correction       – multiplier applied for fatigue
+      method               – "power_weighted" | "blended" | "manual_fallback" | "no_data"
+      sample_count         – number of rides that contributed
+      trend                – "improving" | "stable" | "declining"
+    """
+    RECENCY_TAU_DAYS = 60.0      # half-weight at ~42 days
+    STALENESS_DAYS = 365
+    now = datetime.utcnow()
+    cutoff = now - timedelta(days=365 * 3)
+
+    result = await db.execute(
+        sa_select(Activity)
+        .where(
+            Activity.user_id == user_id,
+            Activity.duration_seconds >= 480,  # at least 8 min
+            Activity.date >= cutoff,
+        )
+        .order_by(Activity.date)
+    )
+    activities = result.scalars().all()
+
+    estimates: list[dict] = []  # each: {est, weight, age_days, dur_conf}
+
+    for act in activities:
+        dur = act.duration_seconds or 0
+        np_ = act.normalized_power
+        # NP-only: avg-power on real rides systematically under-estimates threshold
+        # capability (lots of coasting), so we don't use it as an FTP signal.
+        if not np_ or np_ < 80:
+            continue
+        power = float(np_)
+
+        # Pick a coefficient based purely on duration.  Longer effort = more
+        # representative of true threshold; shorter test = more uncertainty.
+        coef: float
+        dur_conf: float
+        if dur >= 3600:                       # ≥ 60 min long hard
+            coef, dur_conf = 1.00, 1.00
+        elif dur >= 2700:                     # 45-60 min
+            coef, dur_conf = 0.97, 0.95
+        elif dur >= 1200:                     # 20-min test
+            coef, dur_conf = 0.95, 0.70
+        elif dur >= 480:                      # 8-min test
+            coef, dur_conf = 0.90, 0.40
+        else:
+            continue
+
+        est = power * coef
+        if est < 80 or est > 600:
+            continue
+
+        act_date = act.date.replace(tzinfo=None) if act.date and act.date.tzinfo else act.date
+        age_days = max((now - act_date).days, 0) if act_date else 9999
+        recency_w = math.exp(-age_days / RECENCY_TAU_DAYS)
+        weight = recency_w * dur_conf
+
+        estimates.append({
+            "est": est,
+            "weight": weight,
+            "age_days": age_days,
+            "dur_conf": dur_conf,
+        })
+
+    n = len(estimates)
+    has_power_data = n > 0
+    best_ride_age_days = min((e["age_days"] for e in estimates), default=None)
+
+    # ── Fallback: no usable rides ─────────────────────────────────────────────
+    if not has_power_data:
+        if manual_ftp and manual_ftp >= 80:
+            return {
+                "estimated_ftp": manual_ftp,
+                "confidence": 0.2,
+                "confidence_low": int(round(manual_ftp * 0.92)),
+                "confidence_high": int(round(manual_ftp * 1.08)),
+                "best_ride_age_days": None,
+                "tsb_correction": 1.0,
+                "method": "manual_fallback",
+                "sample_count": 0,
+                "trend": "stable",
+            }
+        return {
+            "estimated_ftp": None,
+            "confidence": 0.0,
+            "confidence_low": None,
+            "confidence_high": None,
+            "best_ride_age_days": None,
+            "tsb_correction": 1.0,
+            "method": "no_data",
+            "sample_count": 0,
+            "trend": "stable",
+        }
+
+    # ── Stale fallback ────────────────────────────────────────────────────────
+    if best_ride_age_days is not None and best_ride_age_days > STALENESS_DAYS:
+        if manual_ftp and manual_ftp >= 80:
+            return {
+                "estimated_ftp": manual_ftp,
+                "confidence": 0.3,
+                "confidence_low": int(round(manual_ftp * 0.90)),
+                "confidence_high": int(round(manual_ftp * 1.10)),
+                "best_ride_age_days": int(best_ride_age_days),
+                "tsb_correction": 1.0,
+                "method": "manual_fallback",
+                "sample_count": n,
+                "trend": "stable",
+            }
+        # No manual to fall back on — use stale data with low confidence
+        sorted_ests = sorted(e["est"] for e in estimates)
+        stale_est = int(round(sorted_ests[len(sorted_ests) // 2]))
+        return {
+            "estimated_ftp": stale_est,
+            "confidence": 0.3,
+            "confidence_low": int(round(min(sorted_ests))),
+            "confidence_high": int(round(max(sorted_ests))),
+            "best_ride_age_days": int(best_ride_age_days),
+            "tsb_correction": 1.0,
+            "method": "power_weighted",
+            "sample_count": n,
+            "trend": "stable",
+        }
+
+    # ── Robust weighted percentile (75th) ─────────────────────────────────────
+    estimates.sort(key=lambda e: e["est"])
+    total_w = sum(e["weight"] for e in estimates)
+    cum = 0.0
+    p75 = estimates[-1]["est"]
+    for e in estimates:
+        cum += e["weight"]
+        if cum / total_w >= 0.75:
+            p75 = e["est"]
+            break
+
+    # Confidence band: weighted 10th and 90th percentiles
+    cum = 0.0
+    p10 = estimates[0]["est"]
+    for e in estimates:
+        cum += e["weight"]
+        if cum / total_w >= 0.10:
+            p10 = e["est"]; break
+    cum = 0.0
+    p90 = estimates[-1]["est"]
+    for e in estimates:
+        cum += e["weight"]
+        if cum / total_w >= 0.90:
+            p90 = e["est"]; break
+
+    weighted_ftp = p75
+
+    # ── Trend: recent (≤ 30d) vs older (30-180d) ──────────────────────────────
+    recent = [e["est"] for e in estimates if e["age_days"] <= 30]
+    older = [e["est"] for e in estimates if 30 < e["age_days"] <= 180]
+    trend = "stable"
+    if recent and older:
+        r_mean = sum(recent) / len(recent)
+        o_mean = sum(older) / len(older)
+        delta = (r_mean - o_mean) / o_mean if o_mean else 0
+        if delta > 0.03:
+            trend = "improving"
+            weighted_ftp = 0.7 * r_mean + 0.3 * weighted_ftp  # bias toward recent
+        elif delta < -0.03:
+            trend = "declining"
+            weighted_ftp = 0.7 * r_mean + 0.3 * weighted_ftp
+
+    # ── Fatigue correction (TSB) ──────────────────────────────────────────────
+    fm_result = await db.execute(
+        sa_select(FitnessMetric)
+        .where(FitnessMetric.user_id == user_id)
+        .order_by(FitnessMetric.date.desc())
+        .limit(1)
+    )
+    today_fm = fm_result.scalar_one_or_none()
+    tsb = today_fm.tsb if today_fm else 0.0
+    ctl = today_fm.ctl if today_fm else 0.0
+
+    fatigue_depth = max(-tsb, 0.0)
+    tsb_correction = 1.0 + min(fatigue_depth, 30.0) * 0.003  # max +9%
+    corrected_ftp = weighted_ftp * tsb_correction
+
+    # ── Effective sample-size confidence ──────────────────────────────────────
+    # ESS = (Σw)² / Σw² ; bounded to 0-1 by ESS / 5  (5 hard rides → full conf)
+    sum_w2 = sum(e["weight"] ** 2 for e in estimates)
+    ess = (total_w ** 2) / sum_w2 if sum_w2 > 0 else 0
+    ride_confidence = min(ess / 5.0, 1.0)
+    # Also need some training load for trust
+    ctl_confidence = min(ctl / 20.0, 1.0)
+    confidence = min(ride_confidence, ctl_confidence)
+
+    # ── Blend with manual FTP if confidence is low ────────────────────────────
+    if manual_ftp and manual_ftp >= 80 and confidence < 1.0:
+        blended_ftp = corrected_ftp * confidence + manual_ftp * (1.0 - confidence)
+        method = "blended" if confidence < 0.95 else "power_weighted"
+    else:
+        blended_ftp = corrected_ftp
+        method = "power_weighted"
+
+    final_ftp = int(round(blended_ftp))
+    if final_ftp < 80:
+        return {
+            "estimated_ftp": None,
+            "confidence": 0.0,
+            "confidence_low": None,
+            "confidence_high": None,
+            "best_ride_age_days": int(best_ride_age_days),
+            "tsb_correction": round(tsb_correction, 3),
+            "method": method,
+            "sample_count": n,
+            "trend": trend,
+        }
+
+    return {
+        "estimated_ftp": final_ftp,
+        "confidence": round(confidence, 2),
+        "confidence_low": int(round(p10 * tsb_correction)),
+        "confidence_high": int(round(p90 * tsb_correction)),
+        "best_ride_age_days": int(best_ride_age_days),
+        "tsb_correction": round(tsb_correction, 3),
+        "method": method,
+        "sample_count": n,
+        "trend": trend,
+    }
+
+
 async def compute_pmc_for_user(user_id: str, db: AsyncSession) -> None:
     """
     Recompute the full Performance Management Chart for a user.
     Deletes existing FitnessMetric rows and rebuilds from scratch.
+
+    Note: only `confirmed` (non-quarantined, non-deleted) activities count.
+    The user's current profile FTP is used for every day in the series so
+    the FTP column doesn't oscillate between profile_ftp and a default.
     """
-    # Fetch all activities ordered by date
+    # Fetch profile once — used as the canonical FTP for every day
+    prof_result = await db.execute(
+        sa_select(AthleteProfile).where(AthleteProfile.user_id == user_id)
+    )
+    profile = prof_result.scalar_one_or_none()
+    user_ftp = float(profile.ftp) if profile and profile.ftp else 200.0
+
+    # Fetch all *confirmed* activities ordered by date
     result = await db.execute(
-        sa_select(Activity, AthleteProfile)
-        .join(AthleteProfile, AthleteProfile.user_id == Activity.user_id, isouter=True)
-        .where(Activity.user_id == user_id)
+        sa_select(Activity)
+        .where(
+            Activity.user_id == user_id,
+            Activity.review_status == "confirmed",
+        )
         .order_by(Activity.date)
     )
-    rows = result.all()
+    activities = result.scalars().all()
 
-    if not rows:
+    if not activities:
+        # Still wipe any stale metrics so the UI doesn't show old numbers
+        await db.execute(sa_delete(FitnessMetric).where(FitnessMetric.user_id == user_id))
+        await db.flush()
         return
 
     # Build daily TSS map
     daily_tss: dict[str, float] = {}
-    daily_ftp: dict[str, float] = {}
-    default_ftp = 200.0
-
-    for act, profile in rows:
+    for act in activities:
         day = act.date.date().isoformat()
-        tss = act.tss or 0
-        daily_tss[day] = daily_tss.get(day, 0) + tss
-        ftp = (profile.ftp if profile and profile.ftp else default_ftp)
-        daily_ftp[day] = ftp
+        daily_tss[day] = daily_tss.get(day, 0.0) + (act.tss or 0.0)
 
     # Generate continuous date range
-    start_date = min(datetime.fromisoformat(d) for d in daily_tss)
+    start_date = min(datetime.fromisoformat(d).replace(tzinfo=timezone.utc) for d in daily_tss)
     end_date = datetime.now(timezone.utc)
 
     # Delete existing metrics
@@ -174,13 +465,11 @@ async def compute_pmc_for_user(user_id: str, db: AsyncSession) -> None:
 
     while current <= end_date:
         day = current.date().isoformat()
-        tss = daily_tss.get(day, 0)
+        tss = daily_tss.get(day, 0.0)
 
         ctl = ctl + CTL_ALPHA * (tss - ctl)
         atl = atl + ATL_ALPHA * (tss - atl)
         tsb = ctl - atl
-
-        ftp = daily_ftp.get(day, default_ftp)
 
         metric = FitnessMetric(
             user_id=user_id,
@@ -189,7 +478,7 @@ async def compute_pmc_for_user(user_id: str, db: AsyncSession) -> None:
             atl=round(atl, 2),
             tsb=round(tsb, 2),
             tss=round(tss, 2),
-            ftp=ftp,
+            ftp=user_ftp,
         )
         new_metrics.append(metric)
         current += timedelta(days=1)

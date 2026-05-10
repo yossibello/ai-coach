@@ -27,6 +27,7 @@ from typing import Optional
 
 from app.nutrition.depletion_rules import compute_signals
 from app.nutrition.supplements import SUPPLEMENTS, ANTI_SUPPLEMENTS
+from app.safety.guards import apply_supplement_safety
 
 
 ENGINE_VERSION = "rule_v1"
@@ -144,8 +145,14 @@ def recommend_supplements(
                 "citations":   anti.get("citations", []),
             })
 
+    # ── Hard safety pass: cap doses, drop blocked items, dangerous combos ──
+    safe_stack, safety_warnings = apply_supplement_safety(
+        stack, user_conditions=list(user_contras)
+    )
+    warnings.extend(safety_warnings)
+
     return {
-        "stack":                  stack,
+        "stack":                  safe_stack,
         "depletion_signals":      {k: round(v, 3) for k, v in signals.items()},
         "warnings":                warnings,
         "based_on_blood_test_id": based_on_id,

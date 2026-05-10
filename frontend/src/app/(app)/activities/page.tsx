@@ -1,11 +1,11 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { activitiesAPI } from "@/lib/api";
+import { activitiesAPI, stravaAPI, garminAPI } from "@/lib/api";
 import { formatDuration, formatDistance, formatDate, relativeDate } from "@/lib/utils";
 import type { Activity, PaginatedResponse } from "@/types";
-import { Trash2, ChevronLeft, ChevronRight, Activity as ActivityIcon } from "lucide-react";
+import { Trash2, ChevronLeft, ChevronRight, Activity as ActivityIcon, RefreshCw } from "lucide-react";
 import toast from "react-hot-toast";
 import Link from "next/link";
 
@@ -43,6 +43,97 @@ export default function ActivitiesPage() {
     onError: () => toast.error("Failed to delete activity"),
   });
 
+  // Manual refresh: just re-fetch the activities list.
+  const [refreshing, setRefreshing] = useState(false);
+  async function handleRefresh() {
+    setRefreshing(true);
+    await queryClient.invalidateQueries({ queryKey: ["activities"] });
+    setRefreshing(false);
+  }
+
+  // ── Strava sync ───────────────────────────────────────────────────────
+  const [stravaTaskId, setStravaTaskId] = useState<string | null>(null);
+  const { data: stravaSync } = useQuery({
+    queryKey: ["strava-sync", stravaTaskId],
+    queryFn: () => stravaAPI.getSyncStatus(stravaTaskId!),
+    enabled: !!stravaTaskId,
+    refetchInterval: (q) =>
+      q.state.data?.status === "completed" || q.state.data?.status === "failed" ? false : 3000,
+  });
+  useEffect(() => {
+    if (stravaSync?.status === "completed") {
+      queryClient.invalidateQueries({ queryKey: ["activities"] });
+      toast.success(`Strava: ${stravaSync.progress} activities synced`);
+      setStravaTaskId(null);
+    } else if (stravaSync?.status === "failed") {
+      toast.error("Strava sync failed");
+      setStravaTaskId(null);
+    }
+  }, [stravaSync?.status, stravaSync?.progress, queryClient]);
+
+  // ── Garmin sync ───────────────────────────────────────────────────────
+  const [garminTaskId, setGarminTaskId] = useState<string | null>(null);
+  const { data: garminSync } = useQuery({
+    queryKey: ["garmin-sync", garminTaskId],
+    queryFn: () => garminAPI.syncStatus(garminTaskId!),
+    enabled: !!garminTaskId,
+    refetchInterval: (q) =>
+      q.state.data?.status === "completed" || q.state.data?.status === "failed" ? false : 3000,
+  });
+  useEffect(() => {
+    if (garminSync?.status === "completed") {
+      queryClient.invalidateQueries({ queryKey: ["activities"] });
+      queryClient.invalidateQueries({ queryKey: ["fitness"] });
+      queryClient.invalidateQueries({ queryKey: ["recommendation"] });
+      queryClient.invalidateQueries({ queryKey: ["progression"] });
+      const stats = garminSync.stats;
+      const added = stats ? (stats.inserted ?? 0) : garminSync.progress ?? 0;
+      toast.success(`Garmin: ${added} new activities`);
+      setGarminTaskId(null);
+    } else if (garminSync?.status === "failed") {
+      toast.error(`Garmin sync failed: ${garminSync.error ?? "unknown error"}`);
+      setGarminTaskId(null);
+    }
+  }, [garminSync?.status, garminSync?.progress, garminSync?.stats, queryClient]);
+
+  // ── Sync All ──────────────────────────────────────────────────────────
+  const [syncAllPending, setSyncAllPending] = useState(false);
+  async function handleSyncAll() {
+    setSyncAllPending(true);
+    let any = false;
+    try {
+      const stravaStatus = await stravaAPI.status();
+      if (stravaStatus.connected) {
+        const { task_id } = await stravaAPI.syncHistory();
+        setStravaTaskId(task_id);
+        any = true;
+      }
+    } catch { /* Strava not connected */ }
+    try {
+      const gStatus = await garminAPI.status();
+      if (gStatus.connected) {
+        const { task_id } = await garminAPI.sync(60);
+        setGarminTaskId(task_id);
+        any = true;
+      }
+    } catch { /* Garmin not connected */ }
+    if (!any) toast.error("No services connected. Go to Profile → Integrations.");
+    setSyncAllPending(false);
+  }
+
+  const isSyncing =
+    syncAllPending ||
+    (!!stravaTaskId && stravaSync?.status !== "completed" && stravaSync?.status !== "failed") ||
+    (!!garminTaskId && garminSync?.status !== "completed" && garminSync?.status !== "failed");
+
+  const syncLabel = isSyncing
+    ? `Syncing… ${
+        [stravaTaskId && stravaSync ? `Strava ${stravaSync.progress ?? 0}/${stravaSync.total ?? "?"}` : "",
+         garminTaskId && garminSync ? `Garmin ${garminSync.progress ?? 0}/${garminSync.total ?? "?"}` : ""]
+          .filter(Boolean).join(" · ") || ""
+      }`
+    : "Sync All";
+
   const totalPages = data ? Math.ceil(data.total / PAGE_SIZE) : 1;
 
   return (
@@ -55,13 +146,35 @@ export default function ActivitiesPage() {
             {data ? `${data.total} total rides` : "Loading…"}
           </p>
         </div>
-        <Link
-          href="/upload"
-          className="bg-brand-500 hover:bg-brand-600 text-white px-4 py-2 rounded-lg
-                     text-sm font-medium transition"
-        >
-          + Upload / Sync
-        </Link>
+        <div className="flex items-center gap-2">
+          <button
+            onClick={handleRefresh}
+            disabled={refreshing}
+            title="Reload from server"
+            className="flex items-center gap-1.5 px-3 py-2 bg-surface border border-surface-border
+                       hover:border-brand-500/50 text-slate-300 text-sm rounded-lg transition disabled:opacity-50"
+          >
+            <RefreshCw className={`w-4 h-4 ${refreshing ? "animate-spin" : ""}`} />
+            Refresh
+          </button>
+          <button
+            onClick={handleSyncAll}
+            disabled={isSyncing}
+            title="Pull new rides from Garmin &amp; Strava"
+            className="flex items-center gap-1.5 px-3 py-2 bg-brand-500 hover:bg-brand-600
+                       text-white text-sm font-medium rounded-lg transition disabled:opacity-50"
+          >
+            <RefreshCw className={`w-4 h-4 ${isSyncing ? "animate-spin" : ""}`} />
+            {syncLabel}
+          </button>
+          <Link
+            href="/upload"
+            className="bg-brand-500 hover:bg-brand-600 text-white px-4 py-2 rounded-lg
+                       text-sm font-medium transition"
+          >
+            + Upload
+          </Link>
+        </div>
       </div>
 
       {/* Search */}
