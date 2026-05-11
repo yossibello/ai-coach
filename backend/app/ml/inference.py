@@ -5,7 +5,7 @@ builds the full recommendation, and analyzes individual activities.
 from __future__ import annotations
 
 import os
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import numpy as np
 import torch
@@ -166,7 +166,6 @@ async def generate_recommendation(user: User, db: AsyncSession) -> Recommendatio
 
     # Estimate last-week TSS from recent activities for ramp guard.
     # Activity dates from SQLite are naive; compare against a naive cutoff.
-    from datetime import timedelta
     week_ago = datetime.utcnow() - timedelta(days=7)
     def _naive(d):
         return d.replace(tzinfo=None) if d and d.tzinfo else d
@@ -640,7 +639,6 @@ async def _supplement_stack_for_user(
     Compute the rule-based supplement stack for a user. Pulls latest blood test
     if present. Lightweight enough to run in the same request as the recommendation.
     """
-    from datetime import timedelta
     from app.models.nutrition import BloodTest
     from app.nutrition.engine import recommend_supplements
 

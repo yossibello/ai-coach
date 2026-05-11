@@ -381,6 +381,17 @@ async def sync_garmin(
 
     # ── daily wellness for the same window ────────────────────────────────────
     today = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+    window_start = today - timedelta(days=days)
+
+    # Load all existing health rows for the window in ONE query (avoids N+1).
+    existing_result = await db.execute(
+        sa_select(HealthMetric).where(
+            HealthMetric.user_id == user.id,
+            HealthMetric.date >= window_start,
+        )
+    )
+    existing_map: dict = {row.date: row for row in existing_result.scalars().all()}
+
     for d in range(days):
         day = today - timedelta(days=d)
         try:
@@ -388,16 +399,11 @@ async def sync_garmin(
             if not payload:
                 continue
 
-            existing = await db.execute(
-                sa_select(HealthMetric).where(
-                    HealthMetric.user_id == user.id,
-                    HealthMetric.date == day,
-                )
-            )
-            row = existing.scalar_one_or_none()
+            row = existing_map.get(day)
             if row is None:
                 row = HealthMetric(user_id=user.id, date=day, source="garmin", **payload)
                 db.add(row)
+                existing_map[day] = row
                 stats["health_days_added"] += 1
             else:
                 for k, v in payload.items():
