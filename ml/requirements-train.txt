@@ -1,0 +1,31 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# ML training dependencies — install INSTEAD of backend/requirements.txt
+# (this file installs CUDA PyTorch; backend/requirements.txt has CPU torch)
+#
+# Install:
+#   pip install -r ml/requirements-train.txt
+# ─────────────────────────────────────────────────────────────────────────────
+
+# ── PyTorch with CUDA 12.1 (matches most NVIDIA drivers ≥ 525) ───────────────
+# If your driver is older, replace cu121 with cu118.
+--index-url https://download.pytorch.org/whl/cu121
+torch==2.3.0+cu121
+torchvision==0.18.0+cu121      # not strictly needed but good to have
+
+# Switch back to the default PyPI index for everything else
+--index-url https://pypi.org/simple/
+
+# ── Data / training ──────────────────────────────────────────────────────────
+numpy==1.26.4
+pandas==2.2.2
+pyarrow==16.1.0          # fast parquet I/O
+scikit-learn==1.5.0
+tqdm==4.66.4
+
+# ── The backend package must be importable (PYTHONPATH=./backend is set by
+#    train.sh, but these are the imports train.py/generate_synthetic.py need) ──
+pydantic==2.7.4
+pydantic-settings==2.3.1
+python-dotenv==1.0.1
+sqlalchemy[asyncio]==2.0.30
+aiosqlite==0.20.0
