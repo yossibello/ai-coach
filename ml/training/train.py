@@ -72,8 +72,10 @@ def train(args):
     val_ds   = CyclingDataset(df, seq_len=args.seq_len, athlete_ids=val_ids)
     print(f"Train sequences: {len(train_ds):,}  Val sequences: {len(val_ds):,}")
 
-    n_workers_train = min(4, n_threads) if device.type == "cuda" else min(2, n_threads)
-    n_workers_val   = min(2, n_threads) if device.type == "cuda" else min(1, n_threads)
+    # Allow override via env var for high-core-count machines (default: 8 on GPU)
+    _default_workers = 8 if device.type == "cuda" else min(2, n_threads)
+    n_workers_train = int(os.environ.get("DATALOADER_WORKERS", min(_default_workers, n_threads)))
+    n_workers_val   = max(1, n_workers_train // 2)
     train_loader = DataLoader(
         train_ds,
         batch_size=args.batch_size,
