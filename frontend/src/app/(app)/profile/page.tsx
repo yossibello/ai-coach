@@ -20,6 +20,19 @@ const GOALS: { value: GoalType; label: string }[] = [
   { value: "triathlon",        label: "Triathlon" },
 ];
 
+const EVENT_TYPES: { value: NonNullable<AthleteProfile["event_type"]>; label: string; hint: string }[] = [
+  { value: "long_road",       label: "Long road race",         hint: "4–7h hard pack racing" },
+  { value: "crit",            label: "Criterium",              hint: "45–90 min, repeated max efforts" },
+  { value: "tt",              label: "Time trial",             hint: "Sustained threshold/VO2" },
+  { value: "stage_race",      label: "Stage race",             hint: "Multi-day, recovery between stages" },
+  { value: "gran_fondo",      label: "Gran fondo",             hint: "4–8h endurance + climbs" },
+  { value: "climbing_camp",   label: "Alpine / climbing camp", hint: "Multi-day big climbing volume" },
+  { value: "mtb_marathon",    label: "MTB marathon",           hint: "Off-road 3–6h, variable power" },
+  { value: "ultra_endurance", label: "Ultra-endurance",        hint: "8h+ steady aerobic" },
+  { value: "triathlon_70_3",  label: "Triathlon 70.3",         hint: "~2.5h cycling leg" },
+  { value: "triathlon_140_6", label: "Triathlon Ironman",      hint: "~5h cycling leg" },
+];
+
 export default function ProfilePage() {
   const { data, isLoading } = useQuery({
     queryKey: ["profile"],
@@ -127,7 +140,7 @@ export default function ProfilePage() {
             ))}
           </select>
         </Row>
-        {form.primary_goal === "event_specific" || form.primary_goal?.includes("gran") ? (
+        {form.primary_goal === "event_specific" || form.primary_goal?.includes("gran") || form.primary_goal === "climbing" || form.primary_goal === "criterium" || form.primary_goal === "triathlon" ? (
           <>
             <Row label="Event name">
               <input
@@ -145,6 +158,22 @@ export default function ProfilePage() {
                 onChange={(e) => set("goal_event_date", e.target.value)}
                 className="input-field"
               />
+            </Row>
+            <Row label="Event type" hint="Tunes the AI plan to event demands">
+              <select
+                value={form.event_type ?? ""}
+                onChange={(e) =>
+                  set("event_type", (e.target.value || undefined) as AthleteProfile["event_type"])
+                }
+                className="input-field"
+              >
+                <option value="">Select event type</option>
+                {EVENT_TYPES.map((t) => (
+                  <option key={t.value} value={t.value}>
+                    {t.label} — {t.hint}
+                  </option>
+                ))}
+              </select>
             </Row>
           </>
         ) : null}

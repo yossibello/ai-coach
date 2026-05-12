@@ -89,15 +89,19 @@ async def sync_strava_history(
     db,
     progress_callback: Callable[[int, int], None] | None = None,
 ) -> None:
-    """Fetch all Strava cycling activities and upsert into DB."""
-    from sqlalchemy import select as sa_select
+    """Fetch Strava cycling activities and upsert into DB.
+
+    Incremental: if the user already has Strava activities in the DB, only
+    activities newer than the most-recently-synced one are fetched (using
+    Strava's ``after`` timestamp filter).  A full backfill is performed on
+    first sync (no existing activities).
+    """
+    from sqlalchemy import select as sa_select, func as sa_func
     from app.services.metrics_service import compute_activity_metrics, _score_and_tag
 
     token = await _refresh_token_if_needed(user, db)
 
-    # _refresh_token_if_needed flushes the user row, which expires ORM attributes.
-    # Re-fetch user+profile so compute_activity_metrics can access user.profile
-    # synchronously (without triggering a lazy load that would fail outside greenlet).
+    # Re-fetch user+profile after token refresh flushes/expires ORM attributes.
     from sqlalchemy import select as sa_select_user
     from sqlalchemy.orm import selectinload as _selectinload
     _result = await db.execute(
@@ -107,21 +111,46 @@ async def sync_strava_history(
     )
     user = _result.scalar_one()
 
+    # ── Determine incremental cutoff ──────────────────────────────────────
+    # Find the most recent Strava activity already in the DB so we can pass
+    # ``after=<unix_ts>`` to the API and skip already-synced rides.
+    latest_result = await db.execute(
+        sa_select(sa_func.max(Activity.date)).where(
+            Activity.user_id == user.id,
+            Activity.source == "strava",
+        )
+    )
+    latest_date = latest_result.scalar_one_or_none()
+
+    import calendar as _cal
+    # Use the timestamp of the most-recent activity (minus 1 day overlap to
+    # catch same-day edits), or None for a full backfill on first sync.
+    after_ts: int | None = None
+    if latest_date is not None:
+        from datetime import timedelta
+        cutoff = latest_date - timedelta(days=1)
+        after_ts = int(_cal.timegm(cutoff.timetuple()))
+
     headers = {"Authorization": f"Bearer {token}"}
 
     page = 1
     per_page = 200
-    total_fetched = 0
     all_activities: list[dict] = []
 
     timeout = aiohttp.ClientTimeout(total=60)
 
-    # Paginate through all activities
+    is_full_sync = after_ts is None
+
+    # ── Paginate Strava API ───────────────────────────────────────────────
     async with aiohttp.ClientSession(headers=headers, timeout=timeout) as session:
         while True:
+            params: dict = {"page": page, "per_page": per_page}
+            if after_ts is not None:
+                params["after"] = after_ts
+
             async with session.get(
                 f"{STRAVA_API_BASE}/athlete/activities",
-                params={"page": page, "per_page": per_page},
+                params=params,
             ) as resp:
                 if resp.status != 200:
                     text = await resp.text()
@@ -136,16 +165,16 @@ async def sync_strava_history(
                 break
 
             all_activities.extend(batch)
-            total_fetched = len(all_activities)
 
+            # During pagination, total is unknown — show fetched count only
             if progress_callback:
-                progress_callback(total_fetched, total_fetched)  # total unknown until done
+                progress_callback(len(all_activities), 0)
 
             if len(batch) < per_page:
                 break
             page += 1
 
-    # Upsert — only process Ride/VirtualRide sport types
+    # ── Filter to cycling types ───────────────────────────────────────────
     ride_types = {"Ride", "VirtualRide", "MountainBikeRide", "GravelRide", "EBikeRide"}
     cycling = [a for a in all_activities if a.get("sport_type") in ride_types or a.get("type") in ride_types]
     total_cycling = len(cycling)

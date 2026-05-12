@@ -57,7 +57,24 @@ def _new_garmin_client(username: str, password: str):
             "garminconnect not installed. Add `garminconnect` to requirements.txt."
         ) from exc
     client = Garmin(username, password)
-    client.login()
+    try:
+        client.login()
+    except Exception as exc:
+        msg = str(exc)
+        # Translate common garminconnect errors into user-friendly messages
+        if "TOO_MANY_REQUESTS" in msg or "429" in msg or "TooManyRequests" in type(exc).__name__:
+            raise RuntimeError(
+                "Garmin Connect rate-limited this account. Wait 15–30 minutes then retry."
+            ) from exc
+        if any(k in msg.lower() for k in ("auth", "invalid", "credentials", "password", "401", "403")):
+            raise RuntimeError(
+                "Garmin Connect login failed — check your username and password in Profile → Integrations."
+            ) from exc
+        if any(k in msg.lower() for k in ("timeout", "connection", "network", "ssl")):
+            raise RuntimeError(
+                "Could not reach Garmin Connect servers. Check your internet connection and retry."
+            ) from exc
+        raise RuntimeError(f"Garmin Connect error: {msg}") from exc
     return client
 
 

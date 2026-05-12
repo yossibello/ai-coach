@@ -38,7 +38,7 @@ async def init_db():
     """
     async with engine.begin() as conn:
         # Import all models so Base knows about them
-        from app.models import user, activity, recommendation, health  # noqa: F401
+        from app.models import user, activity, recommendation, health, outcome  # noqa: F401
         await conn.run_sync(Base.metadata.create_all)
 
         # Enable WAL mode for SQLite so concurrent background tasks (Strava +

@@ -30,7 +30,7 @@ MARKERS: dict[str, dict] = {
     "ferritin": {
         "label": "Ferritin",
         "category": "iron",
-        "aliases": ["ferritin"],
+        "aliases": ["ferritin", "s-ferritin", "p-ferritin"],
         "unit": "ng/mL",
         "ref_low": 30, "ref_high": 400,
         "athlete_optimal_low": 50, "athlete_optimal_high": 200,
@@ -42,7 +42,7 @@ MARKERS: dict[str, dict] = {
     "serum_iron": {
         "label": "Serum Iron",
         "category": "iron",
-        "aliases": ["serum iron", "iron, serum", "iron level"],
+        "aliases": ["serum iron", "iron, serum", "iron level", "s-järn", "p-järn", "järn"],
         "unit": "µg/dL",
         "ref_low": 60, "ref_high": 170,
         "athlete_optimal_low": 80, "athlete_optimal_high": 160,
@@ -51,7 +51,7 @@ MARKERS: dict[str, dict] = {
     "transferrin_saturation": {
         "label": "Transferrin Saturation",
         "category": "iron",
-        "aliases": ["transferrin saturation", "tsat", "tf sat", "% saturation"],
+        "aliases": ["transferrin saturation", "tsat", "tf sat", "% saturation", "transferrinmättnad", "järnmättnad"],
         "unit": "%",
         "ref_low": 20, "ref_high": 50,
         "athlete_optimal_low": 25, "athlete_optimal_high": 45,
@@ -60,7 +60,7 @@ MARKERS: dict[str, dict] = {
     "tibc": {
         "label": "Total Iron Binding Capacity",
         "category": "iron",
-        "aliases": ["tibc", "total iron binding"],
+        "aliases": ["tibc", "total iron binding", "total järnbindningskapacitet", "järnbindningskapacitet"],
         "unit": "µg/dL",
         "ref_low": 240, "ref_high": 450,
         "athlete_optimal_low": 240, "athlete_optimal_high": 450,
@@ -69,7 +69,7 @@ MARKERS: dict[str, dict] = {
     "hemoglobin": {
         "label": "Hemoglobin",
         "category": "iron",
-        "aliases": ["hemoglobin", "haemoglobin", "hgb", "hb"],
+        "aliases": ["hemoglobin", "haemoglobin", "hgb", "hb", "b-hb", "b-hemoglobin"],
         "unit": "g/dL",
         "ref_low": 12.0, "ref_high": 17.5,
         "athlete_optimal_low": 13.5, "athlete_optimal_high": 17.0,
@@ -79,7 +79,7 @@ MARKERS: dict[str, dict] = {
     "hematocrit": {
         "label": "Hematocrit",
         "category": "iron",
-        "aliases": ["hematocrit", "haematocrit", "hct"],
+        "aliases": ["hematocrit", "haematocrit", "hct", "hematokrit", "evf", "erytrocyt-volym-fraktion"],
         "unit": "%",
         "ref_low": 36, "ref_high": 50,
         "athlete_optimal_low": 40, "athlete_optimal_high": 50,
@@ -91,7 +91,7 @@ MARKERS: dict[str, dict] = {
     "vitamin_d": {
         "label": "Vitamin D (25-OH)",
         "category": "vitamins",
-        "aliases": ["25-oh", "25(oh)d", "vitamin d", "vit d", "calcidiol", "25 hydroxy"],
+        "aliases": ["25-oh", "25(oh)d", "vitamin d", "vit d", "calcidiol", "25 hydroxy", "kalcidiol", "d-vitamin", "25-oh-vitamin d"],
         "unit": "ng/mL",
         "ref_low": 30, "ref_high": 100,
         "athlete_optimal_low": 40, "athlete_optimal_high": 80,
@@ -104,7 +104,7 @@ MARKERS: dict[str, dict] = {
     "vitamin_b12": {
         "label": "Vitamin B12",
         "category": "vitamins",
-        "aliases": ["b12", "cobalamin", "vitamin b-12"],
+        "aliases": ["b12", "cobalamin", "vitamin b-12", "kobalamin", "s-kobalamin"],
         "unit": "pg/mL",
         "ref_low": 200, "ref_high": 900,
         "athlete_optimal_low": 400, "athlete_optimal_high": 900,
@@ -115,7 +115,7 @@ MARKERS: dict[str, dict] = {
     "folate": {
         "label": "Folate (B9)",
         "category": "vitamins",
-        "aliases": ["folate", "folic acid", "b9"],
+        "aliases": ["folate", "folic acid", "b9", "folat", "folsyra", "s-folat"],
         "unit": "ng/mL",
         "ref_low": 3, "ref_high": 17,
         "athlete_optimal_low": 5, "athlete_optimal_high": 17,
@@ -124,7 +124,7 @@ MARKERS: dict[str, dict] = {
     "vitamin_b6": {
         "label": "Vitamin B6",
         "category": "vitamins",
-        "aliases": ["b6", "pyridoxine", "p5p", "vitamin b-6"],
+        "aliases": ["b6", "pyridoxine", "p5p", "vitamin b-6", "pyridoxin"],
         "unit": "ng/mL",
         "ref_low": 5, "ref_high": 50,
         "athlete_optimal_low": 8, "athlete_optimal_high": 50,
@@ -135,7 +135,7 @@ MARKERS: dict[str, dict] = {
     "magnesium": {
         "label": "Magnesium (serum)",
         "category": "minerals",
-        "aliases": ["magnesium", "mg, serum", "magnesium serum"],
+        "aliases": ["magnesium", "mg, serum", "magnesium serum", "s-magnesium", "p-magnesium"],
         "unit": "mg/dL",
         "ref_low": 1.7, "ref_high": 2.4,
         "athlete_optimal_low": 1.9, "athlete_optimal_high": 2.4,
@@ -156,7 +156,7 @@ MARKERS: dict[str, dict] = {
     "zinc": {
         "label": "Zinc",
         "category": "minerals",
-        "aliases": ["zinc", "zn"],
+        "aliases": ["zinc", "zn", "zink", "s-zink"],
         "unit": "µg/dL",
         "ref_low": 70, "ref_high": 120,
         "athlete_optimal_low": 80, "athlete_optimal_high": 120,
@@ -165,7 +165,7 @@ MARKERS: dict[str, dict] = {
     "calcium": {
         "label": "Calcium",
         "category": "minerals",
-        "aliases": ["calcium, total", "calcium total", "ca, total", "calcium"],
+        "aliases": ["calcium, total", "calcium total", "ca, total", "calcium", "kalcium", "s-kalcium", "p-kalcium"],
         "unit": "mg/dL",
         "ref_low": 8.6, "ref_high": 10.3,
         "athlete_optimal_low": 9.0, "athlete_optimal_high": 10.3,
@@ -174,7 +174,7 @@ MARKERS: dict[str, dict] = {
     "sodium": {
         "label": "Sodium",
         "category": "electrolytes",
-        "aliases": ["sodium", "na", "na+"],
+        "aliases": ["sodium", "na", "na+", "natrium", "s-natrium", "p-natrium"],
         "unit": "mmol/L",
         "ref_low": 135, "ref_high": 145,
         "athlete_optimal_low": 137, "athlete_optimal_high": 143,
@@ -183,7 +183,7 @@ MARKERS: dict[str, dict] = {
     "potassium": {
         "label": "Potassium",
         "category": "electrolytes",
-        "aliases": ["potassium", "k+", "k,"],
+        "aliases": ["potassium", "k+", "k,", "kalium", "s-kalium", "p-kalium"],
         "unit": "mmol/L",
         "ref_low": 3.5, "ref_high": 5.1,
         "athlete_optimal_low": 4.0, "athlete_optimal_high": 5.0,
@@ -194,7 +194,7 @@ MARKERS: dict[str, dict] = {
     "tsh": {
         "label": "TSH",
         "category": "thyroid",
-        "aliases": ["tsh", "thyroid stimulating", "thyrotropin"],
+        "aliases": ["tsh", "thyroid stimulating", "thyrotropin", "tyreotropin", "s-tsh"],
         "unit": "mIU/L",
         "ref_low": 0.4, "ref_high": 4.5,
         "athlete_optimal_low": 0.8, "athlete_optimal_high": 2.5,
@@ -205,7 +205,7 @@ MARKERS: dict[str, dict] = {
     "free_t3": {
         "label": "Free T3",
         "category": "thyroid",
-        "aliases": ["free t3", "ft3", "triiodothyronine, free"],
+        "aliases": ["free t3", "ft3", "triiodothyronine, free", "fritt t3", "fritt trijodtyronin"],
         "unit": "pg/mL",
         "ref_low": 2.0, "ref_high": 4.4,
         "athlete_optimal_low": 2.8, "athlete_optimal_high": 4.4,
@@ -214,7 +214,7 @@ MARKERS: dict[str, dict] = {
     "free_t4": {
         "label": "Free T4",
         "category": "thyroid",
-        "aliases": ["free t4", "ft4", "thyroxine, free"],
+        "aliases": ["free t4", "ft4", "thyroxine, free", "fritt t4", "fritt tyroxin"],
         "unit": "ng/dL",
         "ref_low": 0.8, "ref_high": 1.8,
         "athlete_optimal_low": 1.0, "athlete_optimal_high": 1.6,
@@ -225,7 +225,7 @@ MARKERS: dict[str, dict] = {
     "testosterone_total": {
         "label": "Testosterone (total)",
         "category": "hormones",
-        "aliases": ["testosterone, total", "total testosterone"],
+        "aliases": ["testosterone, total", "total testosterone", "testosteron", "s-testosteron"],
         "unit": "ng/dL",
         "ref_low": 264, "ref_high": 916,
         "athlete_optimal_low": 400, "athlete_optimal_high": 900,
@@ -237,7 +237,7 @@ MARKERS: dict[str, dict] = {
     "testosterone_free": {
         "label": "Testosterone (free)",
         "category": "hormones",
-        "aliases": ["free testosterone", "testosterone, free"],
+        "aliases": ["free testosterone", "testosterone, free", "fritt testosteron"],
         "unit": "pg/mL",
         "ref_low": 50, "ref_high": 210,
         "athlete_optimal_low": 80, "athlete_optimal_high": 210,
@@ -246,7 +246,7 @@ MARKERS: dict[str, dict] = {
     "cortisol": {
         "label": "Cortisol (AM)",
         "category": "hormones",
-        "aliases": ["cortisol", "cortisol am", "morning cortisol"],
+        "aliases": ["cortisol", "cortisol am", "morning cortisol", "kortisol", "s-kortisol"],
         "unit": "µg/dL",
         "ref_low": 6, "ref_high": 23,
         "athlete_optimal_low": 8, "athlete_optimal_high": 18,
@@ -268,7 +268,7 @@ MARKERS: dict[str, dict] = {
     "ck": {
         "label": "Creatine Kinase (CK)",
         "category": "muscle",
-        "aliases": ["creatine kinase", "ck", "cpk"],
+        "aliases": ["creatine kinase", "ck", "cpk", "kreatinkinas", "s-kreatinkinas"],
         "unit": "U/L",
         "ref_low": 30, "ref_high": 200,
         "athlete_optimal_low": 30, "athlete_optimal_high": 400,   # athletes run higher baseline
@@ -279,7 +279,7 @@ MARKERS: dict[str, dict] = {
     "ldh": {
         "label": "LDH",
         "category": "muscle",
-        "aliases": ["ldh", "lactate dehydrogenase"],
+        "aliases": ["ldh", "lactate dehydrogenase", "laktatdehydrogenas", "s-ld ", "p-ld "],
         "unit": "U/L",
         "ref_low": 122, "ref_high": 222,
         "athlete_optimal_low": 122, "athlete_optimal_high": 250,
@@ -288,7 +288,7 @@ MARKERS: dict[str, dict] = {
     "ast": {
         "label": "AST",
         "category": "liver",
-        "aliases": ["ast", "sgot", "aspartate"],
+        "aliases": ["ast", "sgot", "aspartate", "asat", "s-asat", "p-asat"],
         "unit": "U/L",
         "ref_low": 10, "ref_high": 40,
         "athlete_optimal_low": 10, "athlete_optimal_high": 50,
@@ -297,7 +297,7 @@ MARKERS: dict[str, dict] = {
     "alt": {
         "label": "ALT",
         "category": "liver",
-        "aliases": ["alt", "sgpt", "alanine"],
+        "aliases": ["alt", "sgpt", "alanine", "alat", "s-alat", "p-alat"],
         "unit": "U/L",
         "ref_low": 7, "ref_high": 56,
         "athlete_optimal_low": 7, "athlete_optimal_high": 56,
@@ -306,7 +306,7 @@ MARKERS: dict[str, dict] = {
     "creatinine": {
         "label": "Creatinine",
         "category": "kidney",
-        "aliases": ["creatinine"],
+        "aliases": ["creatinine", "kreatinin", "s-kreatinin", "p-kreatinin"],
         "unit": "mg/dL",
         "ref_low": 0.6, "ref_high": 1.3,
         "athlete_optimal_low": 0.7, "athlete_optimal_high": 1.4,   # higher muscle mass → higher
@@ -324,7 +324,7 @@ MARKERS: dict[str, dict] = {
     "urea": {
         "label": "Urea (BUN)",
         "category": "kidney",
-        "aliases": ["urea", "bun", "blood urea nitrogen"],
+        "aliases": ["urea", "bun", "blood urea nitrogen", "karbamid", "s-karbamid", "p-karbamid"],
         "unit": "mg/dL",
         "ref_low": 7, "ref_high": 20,
         "athlete_optimal_low": 7, "athlete_optimal_high": 22,
@@ -335,7 +335,7 @@ MARKERS: dict[str, dict] = {
     "glucose_fasting": {
         "label": "Glucose (fasting)",
         "category": "metabolic",
-        "aliases": ["glucose, fasting", "fasting glucose", "glucose"],
+        "aliases": ["glucose, fasting", "fasting glucose", "glucose", "glukos", "p-glukos", "fp-glukos"],
         "unit": "mg/dL",
         "ref_low": 70, "ref_high": 99,
         "athlete_optimal_low": 75, "athlete_optimal_high": 95,
@@ -355,7 +355,7 @@ MARKERS: dict[str, dict] = {
     "total_cholesterol": {
         "label": "Total Cholesterol",
         "category": "lipids",
-        "aliases": ["total cholesterol", "cholesterol, total"],
+        "aliases": ["total cholesterol", "cholesterol, total", "kolesterol", "kolesterol total", "s-kolesterol"],
         "unit": "mg/dL",
         "ref_low": 100, "ref_high": 200,
         "athlete_optimal_low": 140, "athlete_optimal_high": 200,
@@ -364,7 +364,7 @@ MARKERS: dict[str, dict] = {
     "ldl": {
         "label": "LDL Cholesterol",
         "category": "lipids",
-        "aliases": ["ldl", "ldl cholesterol"],
+        "aliases": ["ldl", "ldl cholesterol", "ldl-kolesterol"],
         "unit": "mg/dL",
         "ref_low": 0, "ref_high": 100,
         "athlete_optimal_low": 0, "athlete_optimal_high": 100,
@@ -373,7 +373,7 @@ MARKERS: dict[str, dict] = {
     "hdl": {
         "label": "HDL Cholesterol",
         "category": "lipids",
-        "aliases": ["hdl", "hdl cholesterol"],
+        "aliases": ["hdl", "hdl cholesterol", "hdl-kolesterol"],
         "unit": "mg/dL",
         "ref_low": 40, "ref_high": 100,
         "athlete_optimal_low": 50, "athlete_optimal_high": 100,
@@ -382,7 +382,7 @@ MARKERS: dict[str, dict] = {
     "triglycerides": {
         "label": "Triglycerides",
         "category": "lipids",
-        "aliases": ["triglycerides", "tg, "],
+        "aliases": ["triglycerides", "tg, ", "triglycerider", "s-triglycerider"],
         "unit": "mg/dL",
         "ref_low": 0, "ref_high": 150,
         "athlete_optimal_low": 0, "athlete_optimal_high": 100,
@@ -443,6 +443,18 @@ SPECIFIC_CONVERSIONS: dict[str, dict[str, float]] = {
     "triglycerides": {"mmol/L": 88.57},
     "magnesium":  {"mmol/L": 2.43},  # × 2.43 → mg/dL
     "calcium":    {"mmol/L": 4.008},
+    # Swedish / SI units commonly seen on Nordic lab reports
+    "hemoglobin": {"g/L": 0.1},                       # 145 g/L → 14.5 g/dL
+    "serum_iron": {"µmol/L": 5.585, "umol/L": 5.585}, # Fe MW 55.85 → µg/dL
+    "sodium":     {"mmol/L": 1.0},                    # already canonical, explicit no-op
+    "potassium":  {"mmol/L": 1.0},
+    "ck":         {"µkat/L": 60.0, "ukat/L": 60.0},   # 1 µkat/L = 60 U/L
+    "ldh":        {"µkat/L": 60.0, "ukat/L": 60.0},
+    "ast":        {"µkat/L": 60.0, "ukat/L": 60.0},
+    "alt":        {"µkat/L": 60.0, "ukat/L": 60.0},
+    "creatinine": {"µmol/L": 1 / 88.4, "umol/L": 1 / 88.4},  # → mg/dL
+    "urea":       {"mmol/L": 2.801},                  # urea mmol/L → mg/dL (BUN)
+    "hematocrit": {"L/L": 100.0, "ratio": 100.0},     # 0.45 L/L → 45 %
 }
 
 

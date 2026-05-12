@@ -28,6 +28,7 @@ from app.models.user import User, AthleteProfile
 from app.models.activity import Activity
 from app.models.recommendation import FitnessMetric
 from app.models.nutrition import BloodTest, BloodMarker, SupplementRecommendation
+from app.models.tracking import SupplementDoseLog, SupplementIntake
 from app.nutrition.engine import recommend_supplements, ENGINE_VERSION
 from app.nutrition.pdf_parser import parse_blood_test_pdf
 from app.nutrition.markers import MARKERS, status_for_value, normalize_unit
@@ -243,7 +244,7 @@ async def get_supplement_stack(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """Return latest supplement stack; regenerate if older than 6h."""
+    """Return latest supplement stack (cached 6h) enriched with today's dose data."""
     res = await db.execute(
         select(SupplementRecommendation)
         .where(SupplementRecommendation.user_id == current_user.id)
@@ -254,10 +255,32 @@ async def get_supplement_stack(
     if sr:
         age = datetime.now(timezone.utc) - sr.generated_at.replace(tzinfo=timezone.utc)
         if age < timedelta(hours=6):
-            return _supp_out(sr)
+            payload = dict(sr.payload or {})
+            payload["stack"] = await _enrich_stack(
+                payload.get("stack", []), current_user.id, db
+            )
+            return SupplementStackOut(
+                id=sr.id,
+                generated_at=sr.generated_at.isoformat(),
+                engine_version=sr.engine_version,
+                is_cold_start=sr.is_cold_start,
+                based_on_blood_test_id=sr.based_on_blood_test_id,
+                payload=payload,
+            )
 
     sr = await _generate_and_store_stack(current_user, db)
-    return _supp_out(sr)
+    payload = dict(sr.payload or {})
+    payload["stack"] = await _enrich_stack(
+        payload.get("stack", []), current_user.id, db
+    )
+    return SupplementStackOut(
+        id=sr.id,
+        generated_at=sr.generated_at.isoformat(),
+        engine_version=sr.engine_version,
+        is_cold_start=sr.is_cold_start,
+        based_on_blood_test_id=sr.based_on_blood_test_id,
+        payload=payload,
+    )
 
 
 @router.post("/supplements/refresh", response_model=SupplementStackOut)
@@ -266,7 +289,18 @@ async def refresh_supplement_stack(
     db: AsyncSession = Depends(get_db),
 ):
     sr = await _generate_and_store_stack(current_user, db)
-    return _supp_out(sr)
+    payload = dict(sr.payload or {})
+    payload["stack"] = await _enrich_stack(
+        payload.get("stack", []), current_user.id, db
+    )
+    return SupplementStackOut(
+        id=sr.id,
+        generated_at=sr.generated_at.isoformat(),
+        engine_version=sr.engine_version,
+        is_cold_start=sr.is_cold_start,
+        based_on_blood_test_id=sr.based_on_blood_test_id,
+        payload=payload,
+    )
 
 
 # ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -330,6 +364,73 @@ def _supp_out(sr: SupplementRecommendation) -> SupplementStackOut:
         based_on_blood_test_id=sr.based_on_blood_test_id,
         payload=sr.payload or {},
     )
+
+
+async def _enrich_stack(stack: list[dict], user_id: str, db: AsyncSession) -> list[dict]:
+    """Overlay real-time dose-log + enrollment status onto stored stack items.
+
+    Returns a new list with four extra fields per item:
+      taken_today      — bool: any dose logged since midnight UTC
+      today_total_dose — float | None: sum of all doses today
+      dose_exceeded    — bool: today_total > 1.5× recommended (safety flag)
+      already_enrolled — bool: user has an active SupplementIntake record
+      dose_warning     — str | None: human-readable over-dose message
+    """
+    # Use naive UTC for comparison — SQLite stores datetimes as naive TEXT
+    today_start = datetime.now(timezone.utc).replace(
+        hour=0, minute=0, second=0, microsecond=0, tzinfo=None
+    )
+
+    dose_res = await db.execute(
+        select(SupplementDoseLog).where(
+            SupplementDoseLog.user_id == user_id,
+            SupplementDoseLog.taken_at >= today_start,
+        )
+    )
+    today_summary: dict[str, dict] = {}
+    for log in dose_res.scalars().all():
+        entry = today_summary.setdefault(
+            log.supplement_key, {"total": 0.0, "unit": log.dose_unit}
+        )
+        entry["total"] += log.dose_taken
+
+    intake_res = await db.execute(
+        select(SupplementIntake.supplement_key).where(
+            SupplementIntake.user_id == user_id,
+            SupplementIntake.stopped_at.is_(None),
+        )
+    )
+    active_keys = {row[0] for row in intake_res.all()}
+
+    # Deduplicate by supplement_key — keep first occurrence (highest-priority)
+    seen: set[str] = set()
+    unique_stack: list[dict] = []
+    for item in stack:
+        k = item.get("supplement_key", "")
+        if k and k not in seen:
+            seen.add(k)
+            unique_stack.append(item)
+    stack = unique_stack
+
+    enriched = []
+    for item in stack:
+        key = item["supplement_key"]
+        taken = key in today_summary
+        total = today_summary.get(key, {}).get("total", 0.0)
+        rec_dose = item.get("dose") or 0.0
+        exceeded = taken and rec_dose > 0 and total > rec_dose * 1.5
+        enriched.append({
+            **item,
+            "taken_today":      taken,
+            "today_total_dose": round(total, 2) if taken else None,
+            "dose_exceeded":    exceeded,
+            "already_enrolled": key in active_keys,
+            "dose_warning": (
+                f"You've taken {total:.1f} {item.get('dose_unit', '')} today — "
+                f"recommended is {rec_dose} {item.get('dose_unit', '')}."
+            ) if exceeded else None,
+        })
+    return enriched
 
 
 async def _generate_and_store_stack(

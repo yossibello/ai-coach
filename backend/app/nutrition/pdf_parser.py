@@ -44,8 +44,9 @@ PARSER_VERSION = "v1"
 #   "FERRITIN .......... 35.2 ng/mL"
 NUMBER_RE = re.compile(r"(?<![A-Za-z\d])(\d+(?:[.,]\d+)?)(?![A-Za-z])")
 UNIT_RE = re.compile(
-    r"(ng/mL|µg/dL|ug/dL|mcg/dL|mg/dL|g/dL|µg/L|ug/L|mcg/L|"
+    r"(ng/mL|µg/dL|ug/dL|mcg/dL|mg/dL|g/dL|µg/L|ug/L|mcg/L|g/L|"
     r"pg/mL|mIU/L|µIU/mL|uIU/mL|nmol/L|pmol/L|µmol/L|umol/L|mmol/L|"
+    r"µkat/L|ukat/L|mkat/L|"
     r"U/L|IU/L|%|mL/min/1\.73m²)",
     re.IGNORECASE,
 )
@@ -73,13 +74,51 @@ def parse_blood_test_pdf(pdf_bytes: bytes, sex: Optional[str] = None) -> dict:
     except Exception as e:
         return _error_result(f"PDF could not be opened: {e}")
 
-    if not full_text.strip():
+    # First pass: regex-based text extraction (fast, free, deterministic)
+    text_result = _parse_text(full_text, sex) if full_text.strip() else None
+
+    # Decide whether to fall back to vision-LLM extraction:
+    #   - no text in the PDF (image-only scan), OR
+    #   - regex parser found < 3 markers (likely unsupported lab format)
+    needs_vision = (
+        text_result is None
+        or len(text_result.get("markers", {})) < 3
+    )
+
+    if needs_vision:
+        try:
+            from app.nutrition import vision_extractor
+        except ImportError:
+            vision_extractor = None  # type: ignore
+
+        if vision_extractor and vision_extractor.is_available():
+            vision_result = vision_extractor.extract_via_vision(pdf_bytes, sex=sex)
+            # Use vision result if it found more markers than the regex pass
+            text_count = len(text_result.get("markers", {})) if text_result else 0
+            vision_count = len(vision_result.get("markers", {}))
+            if vision_count > text_count:
+                # Merge any warnings from the regex pass for transparency
+                if text_result and text_result.get("warnings"):
+                    vision_result.setdefault("warnings", []).extend(text_result["warnings"])
+                return vision_result
+        elif text_result is None:
+            # No text AND no vision available — surface clear actionable error
+            return _error_result(
+                "This PDF contains no extractable text (image-only / scanned) and the "
+                "vision-extraction fallback is not configured. Either: "
+                "(1) re-export the PDF as a text-PDF from your lab portal, "
+                "(2) enable Claude vision (set ANTHROPIC_API_KEY env var and "
+                "`pip install anthropic pypdfium2`), "
+                "or (3) enter values manually."
+            )
+
+    if text_result is None:
         return _error_result(
             "No text extracted from PDF — file is likely image-only / scanned. "
             "Please re-export as text-PDF or enter values manually."
         )
 
-    return _parse_text(full_text, sex)
+    return text_result
 
 
 def _error_result(msg: str) -> dict:

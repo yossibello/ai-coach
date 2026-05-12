@@ -71,11 +71,27 @@ def _load_model() -> CyclingTransformer | None:
         proj_w = sd.get("input_proj.0.weight")
         if proj_w is not None:
             cfg["input_dim"] = int(proj_w.shape[1])
+        # Strip non-init keys before forwarding to the constructor.
+        horizon_aware = bool(cfg.pop("horizon_aware", False))
+        # Per-checkpoint softmax temperature from temperature scaling
+        # (Guo et al. 2017). Defaults to 1.0 (no calibration).
+        temperature = float(cfg.pop("temperature", 1.0))
+        # Detect horizon-aware checkpoints by presence of horizon_proj weights
+        # (in case `horizon_aware` flag is missing from older horizon-aware
+        # checkpoints).
+        if "horizon_proj.0.weight" in sd:
+            horizon_aware = True
+            cfg.setdefault("horizon_dim", int(sd["horizon_proj.0.weight"].shape[1]))
         model = CyclingTransformer(**cfg)
-        model.load_state_dict(sd)
+        # strict=False so a checkpoint without horizon_proj/horizon_query_bias
+        # still loads cleanly into the new architecture (those weights stay at
+        # their initialized values, and we won't pass horizon_query at infer time).
+        model.load_state_dict(sd, strict=False)
         model.eval()
-        # Stash for downstream slicing.
+        # Stash for downstream slicing & dispatch.
         model._input_dim = cfg.get("input_dim", INPUT_DIM)
+        model._horizon_aware = horizon_aware
+        model._temperature = temperature
         _model = model
         return _model
     except Exception:
@@ -343,12 +359,64 @@ def _transformer_recommendation(
     x = torch.tensor(np.stack(seq_features), dtype=torch.float32).unsqueeze(0)  # (1, T, D)
     di = torch.tensor(day_indices, dtype=torch.long).unsqueeze(0)                # (1, T)
 
-    with torch.no_grad():
-        out = model(x, di)
+    # ── Horizon query token (only if model was trained horizon-aware) ────
+    # Map the override (days) into the same {short, medium, event} bucket
+    # used during training. Without an override, default to "short".
+    hq_tensor = None
+    if getattr(model, "_horizon_aware", False):
+        from app.ml.model import encode_horizon
+        h_days = horizon_override_days if horizon_override_days is not None else 7
+        if h_days <= 14:
+            label = "short"
+        elif h_days <= 42:
+            label = "medium"
+        else:
+            label = "event"
+        hq_vec = np.asarray(encode_horizon(label, float(h_days)), dtype=np.float32)
+        hq_tensor = torch.from_numpy(hq_vec).unsqueeze(0)  # (1, HORIZON_DIM)
 
-    workout_probs = torch.softmax(out["workout_logits"][0], dim=-1).numpy()
-    workout_idx = int(workout_probs.argmax())
-    workout_type = WORKOUT_TYPE_NAMES[workout_idx]
+    with torch.no_grad():
+        out = model(x, di, horizon_query=hq_tensor)
+
+    # ── Bayesian posterior selection ──────────────────────────────────────
+    # Combine the model's likelihood with a periodization phase prior, an
+    # event-type bias, and a fatigue/HRV safety factor. This makes the
+    # selection robust to the model's argmax wobbling between similar
+    # workouts (e.g. tempo vs sweetspot) and refuses to recommend
+    # vo2max/threshold when the athlete is clearly fatigued.
+    from app.ml.phase_prior import (
+        select_workout, horizon_to_phase, WORKOUT_TYPE_NAMES as _PP_NAMES,
+    )
+    raw_logits = out["workout_logits"][0].numpy()
+    h_for_phase = horizon_override_days if horizon_override_days is not None else (
+        max(0, int((profile.goal_event_date.replace(tzinfo=timezone.utc) - datetime.now(timezone.utc)).days))
+        if profile and profile.goal_event_date else 0
+    )
+    phase_for_prior = horizon_to_phase(h_for_phase)
+    # Pull most-recent HRV z-score from the PMC-tagged sequence if available.
+    hrv_z_now: float | None = None
+    try:
+        # `tail_health` may be defined upstream in this function via the same
+        # path used to build `profile_vec`. We use a soft lookup to avoid
+        # coupling.
+        hrv_z_now = float(locals().get("_hrv_z_latest")) if locals().get("_hrv_z_latest") is not None else None
+    except Exception:
+        hrv_z_now = None
+    workout_type, workout_conf, top_alts = select_workout(
+        raw_logits,
+        phase=phase_for_prior,
+        event_type=getattr(profile, "event_type", None) if profile else None,
+        tsb=tsb,
+        hrv_z=hrv_z_now,
+        temperature=float(getattr(model, "_temperature", 1.0)),
+        prior_weight=0.6,  # moderate: trust model but respect periodization
+        top_k=3,
+    )
+    workout_probs = np.asarray(
+        [next((p for n, p in top_alts if n == name), 0.0) for name in _PP_NAMES],
+        dtype=np.float32,
+    )
+    workout_idx = _PP_NAMES.index(workout_type)
     intensity_if = float(out["intensity"][0, 0])
     duration_h = float(out["duration"][0, 0])
     ftp_delta = float(out["ftp_delta"][0, 0])
@@ -374,11 +442,29 @@ def _transformer_recommendation(
         ),
     }
 
-    # Build simple 7-day plan from recommended type + recoveries
-    from app.ml.cold_start import WORKOUT_LIBRARY as WL
-    weekly_types = [workout_type, "recovery", "sweetspot", "recovery", "endurance", "long_ride", "recovery"]
+    # Build 7-day plan — use the PHASE-APPROPRIATE schedule for this horizon
+    # so that short/medium/event horizons look genuinely different.
+    # (Without this, all 3 horizons get the same hardcoded pattern and the
+    # user sees no change when switching tabs.)
+    from app.ml.cold_start import WORKOUT_LIBRARY as WL, WEEKLY_PATTERNS, get_periodization_phase, _bias_pattern_for_event
+    dte_for_plan = horizon_override_days if horizon_override_days is not None else (
+        (profile.goal_event_date.replace(tzinfo=timezone.utc) - datetime.now(timezone.utc)).days
+        if profile and profile.goal_event_date else 90
+    )
+    weeks_for_plan = max(0, dte_for_plan // 7)
+    phase_for_plan = get_periodization_phase(weeks_for_plan)
+    phase_pattern = list(WEEKLY_PATTERNS.get(phase_for_plan, WEEKLY_PATTERNS["build"]))
+
+    # Override Day 0 with what the transformer actually predicted.
+    phase_pattern[0] = workout_type
+
+    # Apply event-type bias on the horizon-specific pattern.
+    event_type_val = getattr(profile, "event_type", None) if profile else None
+    if event_type_val and phase_for_plan in ("build", "peak"):
+        phase_pattern = _bias_pattern_for_event(phase_pattern, event_type_val)
+
     weekly_plan = []
-    for i, wt in enumerate(weekly_types):
+    for i, wt in enumerate(phase_pattern):
         t = WL.get(wt, WL["endurance"])
         weekly_plan.append({
             "day_offset": i,
@@ -392,15 +478,66 @@ def _transformer_recommendation(
         })
     weekly_plan[0] = next_workout
 
-    # Risks from transformer outputs
+    # ── Phase 3b: Weekly TSS constraint solver (Friel safe ramp + TSB cap) ─
+    # Re-balance per-day TSS so the weekly total respects: maintain CTL +
+    # phase-appropriate ramp, never push end-of-week TSB below -25, throttle
+    # hard sessions when HRV is suppressed.
+    try:
+        from app.ml.planner import solve_week, tss_to_duration_minutes
+        plan_types = [w["workout_type"] for w in weekly_plan]
+        solved_tss, solver_notes = solve_week(
+            plan_types,
+            ctl=float(ctl),
+            atl=float(atl),
+            tsb=float(tsb),
+            phase=phase_for_plan,
+            hrv_z=hrv_z_now,
+        )
+        for i, (w, new_tss) in enumerate(zip(weekly_plan, solved_tss)):
+            # Skip Day 0 — its duration was set by the transformer's own
+            # duration head and is more athlete-specific.
+            if i == 0:
+                continue
+            new_tss_int = int(round(new_tss))
+            w["target_tss"] = new_tss_int
+            # Update duration only when the workout has a typical IF we can
+            # invert (we use the WL key_metric implied IF).
+            wl_entry = WL.get(w["workout_type"])
+            if wl_entry:
+                # Approximate IF from workout type (matches WL targets):
+                if_map = {
+                    "recovery": 0.45, "easy": 0.60, "endurance": 0.68,
+                    "long_ride": 0.65, "tempo": 0.82, "sweetspot": 0.91,
+                    "threshold": 1.00, "vo2max": 1.10, "sprint": 1.05,
+                    "race": 1.00,
+                }
+                est_if = if_map.get(w["workout_type"], 0.70)
+                w["duration_minutes"] = tss_to_duration_minutes(new_tss, est_if)
+        # Surface solver notes downstream via payload.safety_notes.
+        _planner_notes = solver_notes
+    except Exception:
+        _planner_notes = []
+
+    # Risks from transformer outputs.
+    # Overtraining and undertraining are mutually exclusive: if overtraining
+    # fires more strongly, suppress undertraining entirely (and vice versa).
+    # This corrects for the independent-sigmoid risk head used in v2 — the
+    # next retrain will replace it with a softmax head.
     risks = []
-    if risks_scores[0] > 0.6:
-        risks.append({"type": "overtraining", "severity": "high" if risks_scores[0] > 0.8 else "medium",
+    over_score  = float(risks_scores[0])
+    under_score = float(risks_scores[1])
+    inj_score   = float(risks_scores[2])
+
+    # Only fire the stronger of over/under; suppress the weaker one.
+    if over_score > 0.6 and over_score >= under_score:
+        risks.append({"type": "overtraining",
+                      "severity": "high" if over_score > 0.8 else "medium",
                       "message": "Model detected overtraining patterns. Consider a recovery day."})
-    if risks_scores[1] > 0.6:
+    elif under_score > 0.6 and under_score > over_score:
         risks.append({"type": "undertraining", "severity": "low",
                       "message": "Training load is below your potential. Room to add volume safely."})
-    if risks_scores[2] > 0.6:
+
+    if inj_score > 0.6:
         risks.append({"type": "injury", "severity": "medium",
                       "message": "Training pattern resembles overuse sequences. Monitor for soreness."})
 
@@ -418,8 +555,13 @@ def _transformer_recommendation(
         },
         "risks": risks,
         "confidence": round(confidence, 3),
-        "model_version": "cycling_transformer_v1",
+        "model_version": (
+            "cycling_transformer_v2_horizon"
+            if getattr(model, "_horizon_aware", False)
+            else "cycling_transformer_v1"
+        ),
         "is_cold_start": False,
+        "safety_notes": list(_planner_notes) if _planner_notes else [],
     }
 
 
@@ -483,6 +625,45 @@ def _zone_comment(pct_ftp: float) -> str:
     if pct_ftp < 105: return "Zone 4 — threshold."
     if pct_ftp < 120: return "Zone 5 — VO2max territory."
     return "Zone 6+ — anaerobic/neuromuscular."
+
+
+def _apply_today_ride_guard(payload: dict, activities: list) -> dict:
+    """
+    Shift next_workout and weekly_plan[0] to tomorrow if the user already did a
+    significant ride today. Mirrors the guard in generate_recommendation so that
+    multi-horizon payloads stay in sync with the standard recommendation.
+    """
+    def _naive(d):
+        return d.replace(tzinfo=None) if d and d.tzinfo else d
+
+    today = datetime.utcnow().date()
+    today_acts = [a for a in activities if a.date and _naive(a.date).date() == today]
+    today_tss = sum((a.tss or 0.0) for a in today_acts)
+    today_dur_min = sum((a.duration_seconds or 0) for a in today_acts) / 60.0
+
+    nw = payload.get("next_workout")
+    if today_acts and nw is not None and (today_tss >= 30 or today_dur_min >= 45):
+        nw = dict(nw)
+        nw["day_offset"] = 1
+        nw["already_rode_today"] = True
+        nw["today_tss"] = round(today_tss, 1)
+        nw["today_duration_minutes"] = int(today_dur_min)
+        existing_rationale = nw.get("rationale", "")
+        nw["rationale"] = (
+            f"You've already ridden today ({int(today_dur_min)} min, "
+            f"{int(today_tss)} TSS). Suggested workout moved to tomorrow. "
+            f"{existing_rationale}"
+        ).strip()
+        payload["next_workout"] = nw
+
+        weekly_plan = [dict(w) for w in payload.get("weekly_plan", [])]
+        if weekly_plan:
+            weekly_plan[0] = nw
+            for i, w in enumerate(weekly_plan[1:], start=1):
+                w["day_offset"] = 1 + i
+            payload["weekly_plan"] = weekly_plan
+
+    return payload
 
 
 # ── Multi-horizon recommendation (Phase-1 / Option A) ─────────────────────────
@@ -549,19 +730,52 @@ async def generate_multi_horizon_recommendation(
 
     model = _load_model()
 
-    # If we don't have a model or enough history, fall back to a single
-    # cold-start rec wrapped under the 'event' horizon.
+    # If we don't have a model or enough history, generate cold-start recs for
+    # all 3 horizons using the phase-appropriate schedule for each.
     if total_activities < COLD_START_THRESHOLD or model is None:
         recent_types = [a.workout_type for a in activities[-7:] if a.workout_type]
-        cs = build_cold_start_recommendation(
-            profile, ctl, atl, tsb, recent_types, total_activities
-        )
-        cs["horizon"] = "event"
+        from app.ml.cold_start import WEEKLY_PATTERNS, get_periodization_phase, _bias_pattern_for_event, WORKOUT_LIBRARY as WL
+
+        cs_horizons: dict[str, dict] = {}
+        for h_label, h_days in [("short", HORIZON_DAYS["short"]), ("medium", HORIZON_DAYS["medium"]), ("event", 90)]:
+            wte = h_days // 7
+            phase = get_periodization_phase(wte)
+            cs = build_cold_start_recommendation(
+                profile, ctl, atl, tsb, recent_types, total_activities
+            )
+            # Override the weekly plan with the horizon-specific phase pattern.
+            phase_pattern = list(WEEKLY_PATTERNS.get(phase, WEEKLY_PATTERNS["build"]))
+            event_type_val = getattr(profile, "event_type", None) if profile else None
+            if event_type_val and phase in ("build", "peak"):
+                phase_pattern = _bias_pattern_for_event(phase_pattern, event_type_val)
+            ftp_val = (profile.ftp if profile and profile.ftp else 200) or 200
+            weekly_plan = []
+            for i, wt in enumerate(phase_pattern):
+                t = WL.get(wt, WL["endurance"])
+                weekly_plan.append({
+                    "day_offset": i,
+                    "workout_type": wt,
+                    "duration_minutes": t["duration_minutes"],
+                    "description": t["description"],
+                    "structure": [dict(s) for s in t["structures"]],
+                    "target_tss": t["target_tss"],
+                    "rationale": t["rationale"],
+                    "key_metric": t["key_metric"].format(
+                        z2_lo=int(ftp_val * 0.56), z2_hi=int(ftp_val * 0.75)
+                    ),
+                })
+            cs["weekly_plan"] = weekly_plan
+            cs["next_workout"] = weekly_plan[0]
+            cs["horizon"] = h_label
+            cs["horizon_days"] = h_days
+            cs["horizon_label"] = _horizon_label(h_label, h_days)
+            cs_horizons[h_label] = cs
+
         return {
-            "horizons":       {"event": cs},
+            "horizons":       cs_horizons,
             "is_cold_start":  True,
-            "model_version":  cs.get("model_version", "cold_start_v1"),
-            "active_horizon": "event",
+            "model_version":  cs_horizons["medium"].get("model_version", "cold_start_v1"),
+            "active_horizon": "event" if (profile and profile.goal_event_date) else "medium",
         }
 
     # Compute the user's true days-to-event (used for the 'event' horizon).
@@ -586,6 +800,9 @@ async def generate_multi_horizon_recommendation(
             horizon_override_days=dte,
             health_by_date=health_by_date,
         )
+        # Apply "already rode today" shift so the coach page weekly_plan
+        # stays in sync with the standard recommendation's next_workout.
+        _apply_today_ride_guard(payload, activities)
         payload["horizon"]              = label
         payload["horizon_days"]         = dte
         payload["horizon_label"]        = _horizon_label(label, dte)

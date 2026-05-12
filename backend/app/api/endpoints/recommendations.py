@@ -99,6 +99,54 @@ async def get_multi_horizon_recommendation(
     return await generate_multi_horizon_recommendation(current_user, db)
 
 
+# ── Macrocycle: reverse-periodization plan from event date back to today ─────
+@router.get("/macrocycle")
+async def get_macrocycle(
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Returns a week-by-week plan from today through the user's goal_event_date,
+    reverse-engineered to peak ON event day. Combines the event_type bias with
+    a CTL ramp model (Banister/Coggan).
+
+    Returns 404 if the user has no goal_event_date set.
+    """
+    from app.models.user import AthleteProfile
+    from app.models.recommendation import FitnessMetric
+    from app.ml.macrocycle import build_macrocycle
+
+    profile_result = await db.execute(
+        select(AthleteProfile).where(AthleteProfile.user_id == current_user.id)
+    )
+    profile = profile_result.scalar_one_or_none()
+    if not profile or not profile.goal_event_date:
+        from fastapi import HTTPException
+        raise HTTPException(
+            404, "No goal event set. Set goal_event_date in profile to use macrocycle planning."
+        )
+
+    metric_result = await db.execute(
+        select(FitnessMetric)
+        .where(FitnessMetric.user_id == current_user.id)
+        .order_by(desc(FitnessMetric.date))
+        .limit(1)
+    )
+    latest = metric_result.scalar_one_or_none()
+    ctl = latest.ctl if latest else 0.0
+    atl = latest.atl if latest else 0.0
+
+    return build_macrocycle(
+        current_ctl=ctl,
+        current_atl=atl,
+        event_date=profile.goal_event_date,
+        event_type=profile.event_type,
+        event_name=profile.goal_event_name,
+        training_days_per_week=profile.training_days_per_week or 5,
+        ftp=profile.ftp or 250.0,
+    )
+
+
 @router.get("/analyze/{activity_id}")
 async def analyze_activity(
     activity_id: str,
@@ -136,3 +184,79 @@ def _rec_out(rec: Recommendation) -> RecommendationOut:
         forecast=p.get("forecast"),
         risks=p.get("risks", []),
     )
+
+
+# ── Feedback: did the user accept / modify / reject the suggestion? ──────────
+class FeedbackIn(BaseModel):
+    """Payload for POST /coach/recommendation/{id}/feedback."""
+    action: str                                  # accepted | modified | rejected | skipped
+    post_ride_rpe: int | None = None             # 1–10
+    modified_workout_type: str | None = None     # e.g. "endurance"
+    modified_duration_min: int | None = None
+    comment: str | None = None
+
+
+_VALID_ACTIONS = {"accepted", "modified", "rejected", "skipped"}
+
+
+@router.post("/recommendation/{rec_id}/feedback")
+async def post_recommendation_feedback(
+    rec_id: str,
+    payload: FeedbackIn,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Capture what the user did with a suggestion.
+
+    Append-only: every call inserts a new feedback row (no deduplication —
+    the user can also send a follow-up row later with their post-ride RPE).
+    Used for personalization (Phase 3 LoRA fine-tuning) and monitoring.
+    """
+    from fastapi import HTTPException
+    from app.models.outcome import RecommendationFeedback
+
+    if payload.action not in _VALID_ACTIONS:
+        raise HTTPException(400, f"action must be one of {sorted(_VALID_ACTIONS)}")
+    if payload.post_ride_rpe is not None and not (1 <= payload.post_ride_rpe <= 10):
+        raise HTTPException(400, "post_ride_rpe must be between 1 and 10")
+
+    # Verify the recommendation belongs to this user (prevent IDOR).
+    result = await db.execute(
+        select(Recommendation).where(
+            Recommendation.id == rec_id,
+            Recommendation.user_id == current_user.id,
+        )
+    )
+    rec = result.scalar_one_or_none()
+    if not rec:
+        raise HTTPException(404, "Recommendation not found")
+
+    fb = RecommendationFeedback(
+        recommendation_id=rec_id,
+        user_id=current_user.id,
+        action=payload.action,
+        post_ride_rpe=payload.post_ride_rpe,
+        modified_workout_type=payload.modified_workout_type,
+        modified_duration_min=payload.modified_duration_min,
+        comment=payload.comment,
+    )
+    db.add(fb)
+    await db.flush()
+    return {"id": fb.id, "ok": True}
+
+
+@router.post("/outcomes/backfill")
+async def backfill_outcomes(
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Manually trigger the prediction-vs-actual backfill for the current user.
+
+    Normally this is run by a scheduled worker, but exposing it lets the user
+    refresh their personal accuracy dashboard on demand and lets us verify
+    the job in dev without Celery.
+    """
+    from app.ml.outcomes import backfill_user_outcomes
+    n = await backfill_user_outcomes(current_user.id, db)
+    return {"ok": True, "outcomes_written": n}
+

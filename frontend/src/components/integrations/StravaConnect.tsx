@@ -13,9 +13,19 @@ import {
   CheckCircle2,
 } from "lucide-react";
 
+const STRAVA_TASK_KEY = "strava_sync_task_id";
+
 export default function StravaConnect() {
   const qc = useQueryClient();
-  const [syncTaskId, setSyncTaskId] = useState<string | null>(null);
+  const [syncTaskId, setSyncTaskIdState] = useState<string | null>(() =>
+    typeof window !== "undefined" ? localStorage.getItem(STRAVA_TASK_KEY) : null
+  );
+
+  function setSyncTaskId(id: string | null) {
+    if (id) localStorage.setItem(STRAVA_TASK_KEY, id);
+    else localStorage.removeItem(STRAVA_TASK_KEY);
+    setSyncTaskIdState(id);
+  }
 
   // ── Status ─────────────────────────────────────────────────────────────────
   const { data: status, isLoading: statusLoading } = useQuery({

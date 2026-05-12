@@ -192,7 +192,8 @@ class Athlete:
     experience: float     # years
     adaptation_rate: float
     philosophy: str
-    goal: str             # "general_fitness"|"event_specific"|"ftp_improvement"
+    goal: str             # see GOAL_TYPES in app.ml.norm — must match.
+    event_type: str | None  # "climbing_camp" | "gran_fondo" | "crit" | "tt" | ...
     training_days: int
     n_weeks: int
     event_week: int
@@ -230,11 +231,34 @@ def _make_athlete(rng: np.random.Generator, athlete_id: int) -> Athlete:
 
     philosophy = rng.choice([COGGAN_FRIEL, POGACAR_Z2, POLARIZED],
                             p=[0.45, 0.30, 0.25])
-    goal_str = rng.choice(["general_fitness", "event_specific", "ftp_improvement"],
-                           p=[0.45, 0.35, 0.20])
+    # Sample from the full goal taxonomy so the trained model learns each
+    # one's distinctive training signature. Distribution skews towards
+    # general_fitness (most amateurs) but covers all event-driven goals.
+    goal_str = rng.choice(
+        [
+            "general_fitness", "ftp_improvement", "weight_loss",
+            "event_specific", "gran_fondo", "criterium",
+            "climbing", "triathlon",
+        ],
+        p=[0.30, 0.15, 0.05, 0.15, 0.12, 0.08, 0.10, 0.05],
+    )
+    # Event-driven goals get a concrete event_type so we can bias the schedule.
+    if goal_str == "criterium":
+        ev_type = "crit"
+    elif goal_str == "gran_fondo":
+        ev_type = str(rng.choice(["gran_fondo", "long_road", "mtb_marathon"], p=[0.6, 0.25, 0.15]))
+    elif goal_str == "climbing":
+        ev_type = str(rng.choice(["climbing_camp", "stage_race", "ultra_endurance"], p=[0.6, 0.25, 0.15]))
+    elif goal_str == "triathlon":
+        ev_type = str(rng.choice(["triathlon_70_3", "triathlon_140_6"], p=[0.65, 0.35]))
+    elif goal_str == "event_specific":
+        ev_type = str(rng.choice(["long_road", "tt", "stage_race", "gran_fondo"], p=[0.4, 0.2, 0.2, 0.2]))
+    else:
+        ev_type = None
+    has_event = ev_type is not None
     n_weeks    = int(rng.integers(40, 105))
     event_week = (int(rng.integers(20, n_weeks))
-                  if goal_str == "event_specific" else n_weeks)
+                  if has_event else n_weeks)
 
     start_date = datetime(2021, 1, 1) + timedelta(days=int(rng.integers(0, 365 * 4)))
     ctl = float(rng.uniform(8, 45))
@@ -254,6 +278,7 @@ def _make_athlete(rng: np.random.Generator, athlete_id: int) -> Athlete:
         max_hr=max_hr, resting_hr=resting_hr,
         experience=exp, adaptation_rate=adapt_rate,
         philosophy=str(philosophy), goal=str(goal_str),
+        event_type=ev_type,
         training_days=int(rng.integers(3, 7)),
         n_weeks=n_weeks, event_week=event_week,
         start_date=start_date,
@@ -273,6 +298,35 @@ def _phase(week: int, event_week: int) -> str:
     if weeks_to_event > 3:   return "peak"
     if weeks_to_event > 0:   return "taper"
     return "base"
+
+
+# Event-specific schedule bias. During build/peak (and partly taper), athletes
+# preparing for these events skew their workout mix to match event demands.
+# Each entry maps a generic workout type → preferred replacement for that
+# event_type. The trained model picks up these patterns via the
+# (primary_goal, days_to_event, workout_type) feature triple.
+_SYNTH_EVENT_BIAS: dict[str, dict[str, str]] = {
+    "climbing_camp":   {"vo2max": "sweetspot", "threshold": "sweetspot", "tempo": "long_ride"},
+    "gran_fondo":      {"vo2max": "sweetspot", "threshold": "tempo"},
+    "ultra_endurance": {"vo2max": "endurance", "threshold": "tempo", "sweetspot": "endurance"},
+    "mtb_marathon":    {"threshold": "sweetspot", "tempo": "sweetspot"},
+    "stage_race":      {"vo2max": "threshold"},
+    "crit":            {"sweetspot": "vo2max", "tempo": "vo2max"},
+    "tt":              {"vo2max": "threshold", "sweetspot": "threshold"},
+    "long_road":       {"tempo": "sweetspot"},
+    "triathlon_70_3":  {"vo2max": "threshold"},
+    "triathlon_140_6": {"vo2max": "tempo", "threshold": "sweetspot"},
+}
+
+
+def _apply_event_bias(weekly_wts: list[str], event_type: str | None, phase: str) -> list[str]:
+    """Apply event-specific workout substitutions during build/peak phase."""
+    if not event_type or phase not in ("build", "peak"):
+        return weekly_wts
+    bias = _SYNTH_EVENT_BIAS.get(event_type)
+    if not bias:
+        return weekly_wts
+    return [bias.get(w, w) for w in weekly_wts]
 
 
 # ── HRV / RHR / sleep / body-battery simulation ───────────────────────────────
@@ -438,6 +492,33 @@ def _simulate_ride(
     dist_km = avg_pwr / max(athlete.weight, 1.0) * dur_h * 18  # rough power-to-speed
     elev_m  = float(rng.uniform(0, 800.0 * dur_h))             # up to 800 m/hr
 
+    # ── Risk labels (target supervision for the risk heads) ──────────────
+    # OT class is mutually exclusive: 0=overtraining, 1=undertraining, 2=neither.
+    # Rules align with PMC interpretation (Coggan / Friel) and Banister model:
+    #   overtraining   when TSB very negative or ATL >> CTL (acute spike)
+    #   undertraining  when TSB highly positive AND chronic load is light
+    #   neither        otherwise
+    if tsb < -30 or (atl > 50 and atl > 1.4 * max(ctl, 1.0)):
+        risk_ot_class = 0  # overtraining
+    elif tsb > 25 and atl < ctl * 0.6:
+        risk_ot_class = 1  # undertraining
+    else:
+        risk_ot_class = 2  # neither
+    # Injury / illness risk: count autonomic stress signals (Plews & Buchheit
+    # 2013, Buchheit 2014). \u22652 of {HRV suppressed, RHR elevated, sleep low}
+    # \u2192 elevated risk. Plus a small baseline illness rate.
+    inj_signals = 0
+    if hrv_today is not None and athlete.hrv_baseline > 0:
+        if (athlete.hrv_baseline - hrv_today) / max(athlete.hrv_baseline, 1.0) > 0.10:
+            inj_signals += 1
+    if rhr_today is not None and (rhr_today - athlete.resting_hr) > 6:
+        inj_signals += 1
+    if sleep_score < 60:
+        inj_signals += 1
+    risk_inj_target = 1 if inj_signals >= 2 else 0
+    if rng.random() < 0.02:    # baseline illness/injury surprise
+        risk_inj_target = 1
+
     raw = {
         # identification / target labels
         "athlete_id":            athlete.athlete_id,
@@ -487,6 +568,7 @@ def _simulate_ride(
         "resting_hr":            athlete.resting_hr,
         "experience_years":      athlete.experience,
         "primary_goal":          athlete.goal,
+        "event_type":            athlete.event_type,
         "days_to_event":         max(0.0, (athlete.event_week - (date - athlete.start_date).days / 7.0)) * 7.0,
         # ── Health & recovery (raw values + derived z-score / delta) ────
         "hrv_overnight_ms":      hrv_today if hrv_today is not None else athlete.hrv_baseline,
@@ -500,6 +582,9 @@ def _simulate_ride(
         ),
         "sleep_score":           sleep_score,
         "body_battery":          body_battery,
+        # ── Risk targets (training supervision for risk heads) ──────────
+        "risk_ot_class":         int(risk_ot_class),       # 0=over, 1=under, 2=neither
+        "risk_inj_target":       int(risk_inj_target),     # 0/1
     }
     return raw, tss
 
@@ -589,6 +674,10 @@ def _simulate_athlete(
             phase, SCHEDULES[athlete.philosophy]["base"]
         )
         weekly_wts: list[str] = list(rng.choice(schedule_options))
+
+        # Event-specific bias: re-shape the week so the model sees
+        # "athletes preparing for X tend to do more of Y".
+        weekly_wts = _apply_event_bias(weekly_wts, athlete.event_type, phase)
 
         if len(weekly_wts) > athlete.training_days:
             weekly_wts = weekly_wts[: athlete.training_days]

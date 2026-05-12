@@ -114,6 +114,17 @@ def compute_signals(
         if upcoming_event_type in ("crit", "tt"):
             s["short_max_effort_event"] = 1.0
             s["crit_race_focus"] = 1.0
+        # Long endurance events: extra carb-loading + iron + electrolyte focus.
+        if upcoming_event_type in (
+            "gran_fondo", "long_road", "stage_race", "climbing_camp",
+            "mtb_marathon", "ultra_endurance", "triathlon_140_6",
+        ):
+            s["long_endurance_event"] = 1.0
+            s["carb_loading_focus"] = 1.0
+        # Multi-day / climbing-heavy events: protect quad muscle damage + iron.
+        if upcoming_event_type in ("stage_race", "climbing_camp", "ultra_endurance"):
+            s["muscle_damage_focus"] = 1.0
+            s["multi_day_recovery_focus"] = 1.0
 
     if upcoming_event_type and days_to_event is not None and 0 <= days_to_event <= 1:
         s["pre_key_session"] = 1.0

@@ -14,7 +14,7 @@ Routes:
 """
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -25,7 +25,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.database import get_db
 from app.core.deps import get_current_user
 from app.models.user import User
-from app.models.tracking import SupplementIntake, PerformanceTest
+from app.models.tracking import SupplementIntake, SupplementDoseLog, PerformanceTest
 from app.models.nutrition import SupplementRecommendation
 from app.nutrition.supplements import SUPPLEMENTS
 
@@ -139,6 +139,19 @@ async def create_intake(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
+    # Guard: prevent duplicate active entries for the same supplement
+    existing = await db.execute(
+        select(SupplementIntake)
+        .where(
+            SupplementIntake.user_id == current_user.id,
+            SupplementIntake.supplement_key == payload.supplement_key,
+            SupplementIntake.stopped_at.is_(None),
+        )
+        .limit(1)
+    )
+    if existing.scalar_one_or_none():
+        raise HTTPException(409, f"'{payload.supplement_key}' is already in your active log. Stop it first before logging again.")
+
     catalog = SUPPLEMENTS.get(payload.supplement_key)
     label = payload.label or (catalog["label"] if catalog else payload.supplement_key)
 
@@ -181,6 +194,19 @@ async def create_intake_from_recommendation(
     item = next((s for s in stack if s.get("supplement_key") == payload.supplement_key), None)
     if not item:
         raise HTTPException(404, f"'{payload.supplement_key}' is not in your latest recommended stack.")
+
+    # Guard: prevent duplicate active entries
+    existing = await db.execute(
+        select(SupplementIntake)
+        .where(
+            SupplementIntake.user_id == current_user.id,
+            SupplementIntake.supplement_key == payload.supplement_key,
+            SupplementIntake.stopped_at.is_(None),
+        )
+        .limit(1)
+    )
+    if existing.scalar_one_or_none():
+        raise HTTPException(409, f"'{payload.supplement_key}' is already in your active log.")
 
     intake = SupplementIntake(
         user_id=current_user.id,
@@ -331,3 +357,145 @@ async def delete_performance_test(
     await db.delete(pt)
     await db.commit()
     return {"ok": True}
+
+
+# ─── Supplement dose log ──────────────────────────────────────────────────────
+# Separate from intake (enrollment record). One row = one actual dose taken.
+# Multiple entries per day are valid for split-dose protocols.
+# Feeds: rule engine (taken_today / dose_exceeded) + future ML adherence features.
+
+class DoseLogCreate(BaseModel):
+    supplement_key: str
+    label: str
+    dose_taken: float = Field(gt=0, description="Actual amount taken")
+    dose_unit: Optional[str] = None
+    taken_at: Optional[datetime] = None
+    notes: Optional[str] = None
+
+
+class DoseLogUpdate(BaseModel):
+    dose_taken: Optional[float] = Field(default=None, gt=0)
+    notes: Optional[str] = None
+
+
+class DoseLogOut(BaseModel):
+    id: str
+    supplement_key: str
+    label: str
+    dose_taken: float
+    dose_unit: Optional[str]
+    taken_at: str
+    notes: Optional[str]
+
+
+def _dose_log_out(d: SupplementDoseLog) -> DoseLogOut:
+    return DoseLogOut(
+        id=str(d.id),
+        supplement_key=d.supplement_key,
+        label=d.label,
+        dose_taken=d.dose_taken,
+        dose_unit=d.dose_unit,
+        taken_at=d.taken_at.isoformat(),
+        notes=d.notes,
+    )
+
+
+@router.post("/dose-log", response_model=DoseLogOut, status_code=201)
+async def create_dose_log(
+    payload: DoseLogCreate,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Log one actual dose taken. Multiple per day are fine for split-dose protocols."""
+    log = SupplementDoseLog(
+        user_id=current_user.id,
+        supplement_key=payload.supplement_key,
+        label=payload.label,
+        dose_taken=payload.dose_taken,
+        dose_unit=payload.dose_unit,
+        taken_at=payload.taken_at or datetime.now(timezone.utc),
+        notes=payload.notes,
+    )
+    db.add(log)
+    await db.commit()
+    await db.refresh(log)
+    return _dose_log_out(log)
+
+
+@router.get("/dose-log", response_model=list[DoseLogOut])
+async def list_dose_logs(
+    since: Optional[str] = None,          # ISO date string; default last 30 days
+    supplement_key: Optional[str] = None,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    try:
+        cutoff = (
+            # Python 3.10 fromisoformat() doesn't handle trailing "Z"; normalise first
+            datetime.fromisoformat(since.replace("Z", "+00:00")).astimezone(timezone.utc)
+            if since
+            else datetime.now(timezone.utc) - timedelta(days=30)
+        )
+        # Strip tzinfo so the comparison against SQLite's naive TEXT timestamps works
+        cutoff = cutoff.replace(tzinfo=None)
+    except ValueError:
+        raise HTTPException(400, "Invalid 'since' date format. Use ISO 8601.")
+
+    q = (
+        select(SupplementDoseLog)
+        .where(
+            SupplementDoseLog.user_id == current_user.id,
+            SupplementDoseLog.taken_at >= cutoff,
+        )
+        .order_by(desc(SupplementDoseLog.taken_at))
+    )
+    if supplement_key:
+        q = q.where(SupplementDoseLog.supplement_key == supplement_key)
+
+    rows = (await db.execute(q)).scalars().all()
+    return [_dose_log_out(r) for r in rows]
+
+
+@router.patch("/dose-log/{log_id}", response_model=DoseLogOut)
+async def update_dose_log(
+    log_id: str,
+    payload: DoseLogUpdate,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    res = await db.execute(
+        select(SupplementDoseLog).where(
+            SupplementDoseLog.id == log_id,
+            SupplementDoseLog.user_id == current_user.id,
+        )
+    )
+    log = res.scalar_one_or_none()
+    if not log:
+        raise HTTPException(404, "Dose log entry not found.")
+    if payload.dose_taken is not None:
+        log.dose_taken = payload.dose_taken
+    if payload.notes is not None:
+        log.notes = payload.notes
+    await db.commit()
+    await db.refresh(log)
+    return _dose_log_out(log)
+
+
+@router.delete("/dose-log/{log_id}", status_code=204)
+async def delete_dose_log(
+    log_id: str,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    res = await db.execute(
+        select(SupplementDoseLog).where(
+            SupplementDoseLog.id == log_id,
+            SupplementDoseLog.user_id == current_user.id,
+        )
+    )
+    log = res.scalar_one_or_none()
+    if not log:
+        raise HTTPException(404, "Dose log entry not found.")
+    await db.delete(log)
+    await db.commit()
+

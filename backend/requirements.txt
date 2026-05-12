@@ -24,6 +24,9 @@ fitparse==1.2.0          # .fit files (Garmin)
 gpxpy==1.6.2             # .gpx files
 lxml==5.2.2              # fast XML parsing for TCX
 pdfplumber==0.11.0       # blood-test PDF parsing
+pypdfium2==4.30.0        # render scanned PDF pages → image (no Poppler dep)
+Pillow>=10.0.0           # image encoding for vision fallback
+anthropic>=0.40.0        # Claude vision fallback for image-only blood test PDFs
 numpy==1.26.4
 
 # ─── ML ────────────────────────────────────────────────────────────────────────

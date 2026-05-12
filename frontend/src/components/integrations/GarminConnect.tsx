@@ -19,14 +19,24 @@ import {
 
 type Method = "credentials" | "oauth";
 
+const GARMIN_TASK_KEY = "garmin_sync_task_id";
+
 export default function GarminConnect() {
   const qc = useQueryClient();
   const [method, setMethod] = useState<Method>("credentials");
   const [showForm, setShowForm] = useState(false);
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
-  const [syncTaskId, setSyncTaskId] = useState<string | null>(null);
+  const [syncTaskId, setSyncTaskIdState] = useState<string | null>(() =>
+    typeof window !== "undefined" ? localStorage.getItem(GARMIN_TASK_KEY) : null
+  );
   const [syncStats, setSyncStats] = useState<Record<string, number> | null>(null);
+
+  function setSyncTaskId(id: string | null) {
+    if (id) localStorage.setItem(GARMIN_TASK_KEY, id);
+    else localStorage.removeItem(GARMIN_TASK_KEY);
+    setSyncTaskIdState(id);
+  }
 
   // ── Status ─────────────────────────────────────────────────────────────────
   const { data: status, isLoading: statusLoading } = useQuery({

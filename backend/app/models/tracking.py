@@ -9,7 +9,7 @@ effects (Stage 3 in the architecture plan).
 from __future__ import annotations
 
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 
 from sqlalchemy import (
     String, Float, Integer, DateTime, Text, ForeignKey, func,
@@ -64,6 +64,41 @@ class SupplementIntake(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
     )
+
+    user: Mapped["User"] = relationship("User")
+
+
+class SupplementDoseLog(Base):
+    """One actual dose taken on a specific date/time.
+
+    Separate from SupplementIntake (the enrollment record) so users can:
+      • Log split doses (e.g. 2× 2.5 g creatine)
+      • Edit individual dose amounts
+      • Track dose consistency over time
+
+    Rule engine reads this table to compute taken_today / dose_exceeded.
+    ML pipeline uses it as supplement-adherence features for performance
+    correlation (days_on_creatine, dose_consistency, adherence_rate).
+    """
+    __tablename__ = "supplement_dose_logs"
+
+    id: Mapped[str] = mapped_column(
+        UUID(as_uuid=False), primary_key=True, default=lambda: str(uuid.uuid4())
+    )
+    user_id: Mapped[str] = mapped_column(
+        UUID(as_uuid=False), ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False, index=True,
+    )
+    supplement_key: Mapped[str] = mapped_column(String(80), nullable=False, index=True)
+    label:          Mapped[str] = mapped_column(String(200), nullable=False)
+    dose_taken:     Mapped[float] = mapped_column(Float, nullable=False)
+    dose_unit:      Mapped[str | None] = mapped_column(String(40), nullable=True)
+
+    taken_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, index=True,
+        default=lambda: datetime.now(timezone.utc),
+    )
+    notes: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     user: Mapped["User"] = relationship("User")
 

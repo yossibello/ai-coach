@@ -28,7 +28,17 @@ export interface AthleteProfile {
   training_days_per_week: number;
   diet?: "omnivore" | "vegetarian" | "vegan" | "pescatarian" | "keto";
   climate?: "temperate" | "hot_humid" | "hot_dry" | "cold" | "northern_winter" | "indoor_only";
-  event_type?: "long_road" | "crit" | "tt" | "stage_race" | "gran_fondo";
+  event_type?:
+    | "long_road"
+    | "crit"
+    | "tt"
+    | "stage_race"
+    | "gran_fondo"
+    | "climbing_camp"
+    | "mtb_marathon"
+    | "ultra_endurance"
+    | "triathlon_70_3"
+    | "triathlon_140_6";
   recent_illness_count_3m?: number;
 }
 
@@ -200,6 +210,70 @@ export interface TrainingRisk {
   type: "overtraining" | "undertraining" | "injury" | "illness" | "staleness";
   severity: "low" | "medium" | "high";
   message: string;
+}
+
+// ─── Multi-Horizon Recommendation ────────────────────────────────────────────
+// One model — three horizons (short / medium / event). Each horizon's payload
+// mirrors the standard CoachRecommendation shape (next_workout, weekly_plan…)
+// plus a `horizon_label` for the UI.
+export type HorizonKey = "short" | "medium" | "event";
+
+export interface HorizonPayload {
+  horizon: HorizonKey;
+  horizon_days: number;
+  horizon_label: string;
+  next_workout: WorkoutPlan;
+  weekly_plan: WorkoutPlan[];
+  insights: CoachInsight[];
+  forecast: FitnessForecast;
+  risks: TrainingRisk[];
+  confidence: number;
+  model_version: string;
+  readiness?: {
+    score: number;
+    status: string;
+    advice?: string;
+  };
+  safety_notes?: string[];
+}
+
+export interface MultiHorizonRecommendation {
+  is_cold_start: boolean;
+  model_version: string;
+  active_horizon: HorizonKey;
+  horizons: Partial<Record<HorizonKey, HorizonPayload>>;
+  supplements?: Record<string, unknown> | null;
+}
+
+// ─── Macrocycle (reverse-periodization plan to event date) ──────────────────
+export interface MacrocycleWeek {
+  week_index: number;
+  week_start: string;          // ISO date of the Monday
+  weeks_to_event: number;
+  phase: "base" | "build" | "peak" | "taper" | "event_week";
+  target_weekly_tss: number;
+  target_ctl_end: number;
+  workout_focus: string[];
+  is_recovery_week: boolean;
+  notes: string;
+}
+
+export interface Macrocycle {
+  event_date: string;
+  event_name?: string | null;
+  event_type?: string | null;
+  current_ctl: number;
+  current_atl: number;
+  peak_ctl_target: number;
+  planned_tsb_event: number;
+  weeks_to_event: number;
+  days_to_event: number;
+  feasibility: "comfortable" | "balanced" | "ambitious" | "unrealistic";
+  confidence: number;
+  weeks: MacrocycleWeek[];
+  summary: string[];
+  method: string;
+  error?: string;
 }
 
 // ─── Upload ──────────────────────────────────────────────────────────────────

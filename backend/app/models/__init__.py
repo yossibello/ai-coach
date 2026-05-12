@@ -9,5 +9,6 @@ from app.models.nutrition import (  # noqa: F401
 )
 from app.models.tracking import (  # noqa: F401
     SupplementIntake,
+    SupplementDoseLog,
     PerformanceTest,
 )

@@ -1,11 +1,11 @@
 "use client";
 
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { useEffect } from "react";
+import { useEffect, useState, useMemo } from "react";
 import { coachAPI } from "@/lib/api";
-import { Brain, RefreshCw, AlertTriangle, CheckCircle, Info, Zap, Calendar } from "lucide-react";
+import { Brain, RefreshCw, AlertTriangle, CheckCircle, Info, Zap, Calendar, Target } from "lucide-react";
 import { cn, formatDuration } from "@/lib/utils";
-import type { CoachRecommendation, WorkoutPlan, CoachInsight, TrainingRisk } from "@/types";
+import type { CoachRecommendation, WorkoutPlan, CoachInsight, TrainingRisk, HorizonKey, HorizonPayload, Macrocycle, MacrocycleWeek } from "@/types";
 import toast from "react-hot-toast";
 
 function isStale(generatedAt: string | undefined): boolean {
@@ -23,10 +23,47 @@ export default function CoachPage() {
     queryFn: () => coachAPI.getRecommendation(),
   });
 
+  // Multi-horizon: short / medium / event side-by-side. Always fresh.
+  const { data: multi, isLoading: multiLoading } = useQuery({
+    queryKey: ["coach-multi-horizon"],
+    queryFn: () => coachAPI.getMultiHorizon(),
+    staleTime: 5 * 60 * 1000, // 5 min
+  });
+
+  // Macrocycle: reverse-periodization plan. 404 silently if no goal_event_date.
+  const { data: macro } = useQuery({
+    queryKey: ["coach-macrocycle"],
+    queryFn: () => coachAPI.getMacrocycle().catch(() => null),
+    staleTime: 30 * 60 * 1000, // 30 min — changes only when plan/event changes
+  });
+
+  // User-selected horizon override — persisted in localStorage so a page
+  // refresh doesn't reset it back to the backend's default.
+  const [horizonOverride, setHorizonOverride] = useState<HorizonKey | null>(() => {
+    try {
+      const saved = localStorage.getItem("coach-horizon");
+      if (saved === "short" || saved === "medium" || saved === "event") return saved;
+    } catch {}
+    return null;
+  });
+  const setHorizon = (h: HorizonKey) => {
+    try { localStorage.setItem("coach-horizon", h); } catch {}
+    setHorizonOverride(h);
+  };
+  const activeHorizon: HorizonKey | null = useMemo(() => {
+    if (!multi) return null;
+    if (horizonOverride && multi.horizons[horizonOverride]) return horizonOverride;
+    return multi.active_horizon;
+  }, [multi, horizonOverride]);
+  const horizonPayload: HorizonPayload | undefined =
+    multi && activeHorizon ? multi.horizons[activeHorizon] : undefined;
+
   const refresh = useMutation({
     mutationFn: () => coachAPI.refreshRecommendation(),
     onSuccess: (d) => {
       qc.setQueryData(["coach-recommendation"], d);
+      qc.invalidateQueries({ queryKey: ["coach-multi-horizon"] });
+      qc.invalidateQueries({ queryKey: ["coach-macrocycle"] });
       toast.success("Recommendation updated");
     },
   });
@@ -92,6 +129,24 @@ export default function CoachPage() {
         </button>
       </div>
 
+      {/* Horizon picker (multi-horizon: short / medium / event) */}
+      {multi && (
+        <HorizonPicker
+          multi={multi}
+          activeHorizon={activeHorizon}
+          onSelect={setHorizon}
+          isUserOverride={horizonOverride !== null}
+        />
+      )}
+      {multiLoading && !multi && (
+        <div className="text-xs text-slate-500">Loading horizon options…</div>
+      )}
+
+      {/* Macrocycle: reverse-periodization plan to event date */}
+      {macro && !macro.error && macro.weeks && macro.weeks.length > 0 && (
+        <MacrocycleCard macro={macro} />
+      )}
+
       {/* Risks */}
       {data.risks?.length > 0 && <RiskBanner risks={data.risks} />}
 
@@ -103,16 +158,29 @@ export default function CoachPage() {
         <h2 className="text-lg font-semibold text-white mb-4 flex items-center gap-2">
           <Calendar className="w-5 h-5 text-brand-400" />
           7-Day Training Plan
+          {horizonPayload && (
+            <span className="text-xs text-slate-500 font-normal">
+              · {horizonPayload.horizon_label}
+            </span>
+          )}
         </h2>
         <div className="space-y-3">
-          {data.weekly_plan?.map((w, i) => (
-            <WorkoutCard key={i} plan={w} highlight={i === 0} />
+          {(horizonPayload?.weekly_plan ?? data.weekly_plan)?.map((w, i) => (
+            // Day 0 always uses the authoritative standard rec (full safety
+            // pipeline applied). Horizon tabs only differentiate days 1–6.
+            <WorkoutCard
+              key={i}
+              plan={i === 0 && data.next_workout ? data.next_workout : w}
+              highlight={i === 0}
+            />
           ))}
         </div>
       </div>
 
       {/* Forecast */}
-      {data.forecast && <ForecastCard forecast={data.forecast} />}
+      {(horizonPayload?.forecast ?? data.forecast) && (
+        <ForecastCard forecast={horizonPayload?.forecast ?? data.forecast} />
+      )}
     </div>
   );
 }
@@ -275,6 +343,214 @@ function ForecastCard({ forecast }: { forecast: CoachRecommendation["forecast"] 
             <div className="text-xs text-slate-400 mt-1">Event readiness</div>
           </div>
         )}
+      </div>
+    </div>
+  );
+}
+
+// ─── Macrocycle: reverse-periodization plan to event date ──────────────────
+// Week-by-week phase + target TSS scaffold computed from current CTL → peak CTL.
+// Day-to-day model recs slot inside this skeleton.
+const PHASE_STYLES: Record<string, string> = {
+  base:       "bg-blue-500/15 border-blue-500/30 text-blue-300",
+  build:      "bg-amber-500/15 border-amber-500/30 text-amber-300",
+  peak:       "bg-orange-500/15 border-orange-500/30 text-orange-300",
+  taper:      "bg-emerald-500/15 border-emerald-500/30 text-emerald-300",
+  event_week: "bg-fuchsia-500/15 border-fuchsia-500/30 text-fuchsia-300",
+};
+
+const FEASIBILITY_BADGE: Record<Macrocycle["feasibility"], string> = {
+  comfortable:  "bg-emerald-500/10 border-emerald-500/30 text-emerald-300",
+  balanced:     "bg-blue-500/10 border-blue-500/30 text-blue-300",
+  ambitious:    "bg-amber-500/10 border-amber-500/30 text-amber-300",
+  unrealistic:  "bg-red-500/10 border-red-500/30 text-red-300",
+};
+
+function MacrocycleCard({ macro }: { macro: Macrocycle }) {
+  const eventDate = new Date(macro.event_date);
+  const eventLabel = eventDate.toLocaleDateString(undefined, {
+    weekday: "short", month: "short", day: "numeric",
+  });
+
+  return (
+    <div className="bg-surface-card border border-surface-border rounded-2xl p-5 space-y-4">
+      <div className="flex items-start justify-between gap-3 flex-wrap">
+        <div>
+          <h2 className="text-lg font-semibold text-white flex items-center gap-2">
+            <Target className="w-5 h-5 text-brand-400" />
+            Macrocycle to {macro.event_name || "event"}
+          </h2>
+          <p className="text-xs text-slate-400 mt-1">
+            {eventLabel} · {macro.days_to_event} days · {macro.weeks_to_event} weeks
+            {macro.event_type && (
+              <span className="ml-1 capitalize">· {macro.event_type.replace(/_/g, " ")}</span>
+            )}
+          </p>
+        </div>
+        <span className={cn(
+          "text-xs px-2.5 py-1 rounded-full border capitalize",
+          FEASIBILITY_BADGE[macro.feasibility]
+        )}>
+          {macro.feasibility}
+        </span>
+      </div>
+
+      {/* CTL ramp summary */}
+      <div className="grid grid-cols-3 gap-3 text-center">
+        <div className="bg-surface-bg border border-surface-border rounded-xl p-3">
+          <div className="text-[10px] uppercase tracking-wide text-slate-500">Current CTL</div>
+          <div className="text-xl font-bold text-white mt-1">{macro.current_ctl.toFixed(0)}</div>
+        </div>
+        <div className="bg-surface-bg border border-surface-border rounded-xl p-3">
+          <div className="text-[10px] uppercase tracking-wide text-slate-500">Peak Target</div>
+          <div className="text-xl font-bold text-brand-400 mt-1">{macro.peak_ctl_target.toFixed(0)}</div>
+        </div>
+        <div className="bg-surface-bg border border-surface-border rounded-xl p-3">
+          <div className="text-[10px] uppercase tracking-wide text-slate-500">Race-day TSB</div>
+          <div className="text-xl font-bold text-emerald-400 mt-1">+{macro.planned_tsb_event.toFixed(0)}</div>
+        </div>
+      </div>
+
+      {/* Week-by-week strip */}
+      <div>
+        <div className="text-xs font-medium text-slate-400 mb-2">Weekly schedule</div>
+        <div className="overflow-x-auto -mx-1 px-1">
+          <div className="flex gap-2 min-w-max pb-1">
+            {macro.weeks.map((w) => (
+              <MacrocycleWeekCell key={w.week_index} week={w} />
+            ))}
+          </div>
+        </div>
+      </div>
+
+      {/* Plan summary */}
+      {macro.summary?.length > 0 && (
+        <ul className="text-xs text-slate-400 space-y-1 pt-1 border-t border-surface-border">
+          {macro.summary.map((s, i) => (
+            <li key={i} className="flex gap-2"><span className="text-slate-600">·</span>{s}</li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
+
+function MacrocycleWeekCell({ week }: { week: MacrocycleWeek }) {
+  const date = new Date(week.week_start);
+  const label = date.toLocaleDateString(undefined, { month: "short", day: "numeric" });
+  const phaseStyle = PHASE_STYLES[week.phase] ?? PHASE_STYLES.build;
+
+  return (
+    <div
+      title={`${week.notes}\nFocus: ${week.workout_focus.join(", ")}`}
+      className={cn(
+        "min-w-[88px] rounded-xl border p-2.5 text-center transition-transform hover:-translate-y-0.5",
+        phaseStyle,
+        week.is_recovery_week && "ring-1 ring-slate-500/40 ring-offset-1 ring-offset-surface-card",
+      )}
+    >
+      <div className="text-[10px] opacity-70">W{week.week_index + 1} · {label}</div>
+      <div className="text-xs font-semibold capitalize mt-0.5">
+        {week.phase.replace("_", " ")}
+      </div>
+      <div className="text-base font-bold text-white mt-1">{week.target_weekly_tss}</div>
+      <div className="text-[10px] opacity-70">TSS · CTL {week.target_ctl_end.toFixed(0)}</div>
+      {week.is_recovery_week && (
+        <div className="text-[9px] mt-1 uppercase tracking-wide opacity-80">recovery</div>
+      )}
+    </div>
+  );
+}
+
+// ─── Horizon Picker ─────────────────────────────────────────────────────────
+// Three-tab selector for short / medium / event horizons.
+// Backend recommends one (`active_horizon`); user can override to compare.
+function HorizonPicker({
+  multi,
+  activeHorizon,
+  onSelect,
+  isUserOverride,
+}: {
+  multi: import("@/types").MultiHorizonRecommendation;
+  activeHorizon: HorizonKey | null;
+  onSelect: (h: HorizonKey | null) => void;
+  isUserOverride: boolean;
+}) {
+  const order: HorizonKey[] = ["short", "medium", "event"];
+  const present = order.filter((k) => multi.horizons[k]);
+  if (present.length <= 1) return null;
+
+  const ICONS: Record<HorizonKey, JSX.Element> = {
+    short:  <Zap className="w-3.5 h-3.5" />,
+    medium: <Calendar className="w-3.5 h-3.5" />,
+    event:  <Target className="w-3.5 h-3.5" />,
+  };
+  const TITLES: Record<HorizonKey, string> = {
+    short:  "Short term",
+    medium: "Medium build",
+    event:  "Event peak",
+  };
+
+  return (
+    <div className="bg-surface-card border border-surface-border rounded-2xl p-4">
+      <div className="flex items-center justify-between mb-3">
+        <div className="text-xs uppercase tracking-wider text-slate-400 font-medium">
+          Planning horizon
+          {!isUserOverride && (
+            <span className="ml-2 text-slate-500 lowercase tracking-normal">
+              · auto-selected
+            </span>
+          )}
+        </div>
+        {isUserOverride && (
+          <button
+            onClick={() => onSelect(null)}
+            className="text-xs text-slate-400 hover:text-white"
+          >
+            Reset to auto
+          </button>
+        )}
+      </div>
+      <div className="grid grid-cols-3 gap-2">
+        {present.map((key) => {
+          const h = multi.horizons[key]!;
+          const active = activeHorizon === key;
+          const isAuto = !isUserOverride && multi.active_horizon === key;
+          return (
+            <button
+              key={key}
+              onClick={() => onSelect(key)}
+              className={cn(
+                "text-left p-3 rounded-xl border transition-colors",
+                active
+                  ? "bg-brand-500/10 border-brand-500/40 text-white"
+                  : "bg-surface-card-hover border-surface-border text-slate-300 hover:border-brand-500/30"
+              )}
+            >
+              <div className="flex items-center gap-2 text-sm font-semibold">
+                {ICONS[key]}
+                {TITLES[key]}
+                {isAuto && (
+                  <span className="ml-auto text-[10px] text-brand-400 bg-brand-500/10 border border-brand-500/20 rounded px-1.5 py-0.5">
+                    AI pick
+                  </span>
+                )}
+              </div>
+              <div className="text-xs text-slate-400 mt-1 leading-snug">
+                {h.horizon_label}
+              </div>
+              <div className="text-xs text-slate-500 mt-1.5 flex items-center gap-2">
+                <span>{h.next_workout?.duration_minutes ?? 0} min</span>
+                <span>·</span>
+                <span>TSS {h.next_workout?.target_tss ?? 0}</span>
+                <span>·</span>
+                <span className="capitalize">
+                  {h.next_workout?.workout_type?.replace("_", " ")}
+                </span>
+              </div>
+            </button>
+          );
+        })}
       </div>
     </div>
   );

@@ -3,6 +3,8 @@ import type {
   Activity,
   AthleteProfile,
   CoachRecommendation,
+  Macrocycle,
+  MultiHorizonRecommendation,
   FitnessProgression,
   PaginatedResponse,
   UploadResult,
@@ -131,6 +133,16 @@ export const coachAPI = {
 
   refreshRecommendation: () =>
     api.post<CoachRecommendation>("/api/v1/coach/recommendation/refresh").then((r) => r.data),
+
+  // Multi-horizon: short / medium / event suggestions side-by-side. Always fresh.
+  getMultiHorizon: () =>
+    api.get<MultiHorizonRecommendation>("/api/v1/coach/recommendation/multi-horizon")
+      .then((r) => r.data),
+
+  // Macrocycle: week-by-week reverse-periodization plan from today to event date.
+  // Returns 404 if user has no goal_event_date set.
+  getMacrocycle: () =>
+    api.get<Macrocycle>("/api/v1/coach/macrocycle").then((r) => r.data),
 
   analyzeActivity: (activityId: string) =>
     api.get<{ analysis: string; insights: string[] }>(
@@ -265,6 +277,12 @@ export interface SupplementItem {
   contraindications: string[];
   score: number;
   triggered_by: string[];
+  // Real-time overlay (from dose-log table, computed on GET)
+  taken_today: boolean;
+  today_total_dose: number | null;
+  dose_exceeded: boolean;
+  already_enrolled: boolean;
+  dose_warning: string | null;
 }
 
 export interface SupplementWarning {
@@ -348,6 +366,16 @@ export interface SupplementIntakeRecord {
   is_active: boolean;
 }
 
+export interface DoseLogRecord {
+  id: string;
+  supplement_key: string;
+  label: string;
+  dose_taken: number;
+  dose_unit: string | null;
+  taken_at: string;
+  notes: string | null;
+}
+
 export interface PerformanceTestRecord {
   id: string;
   test_date: string;
@@ -427,6 +455,31 @@ export const trackingAPI = {
 
   deletePerformanceTest: (id: string) =>
     api.delete(`/api/v1/tracking/performance-tests/${id}`).then((r) => r.data),
+};
+
+export const doseLogAPI = {
+  create: (body: {
+    supplement_key: string;
+    label: string;
+    dose_taken: number;
+    dose_unit?: string;
+    taken_at?: string;
+    notes?: string;
+  }) =>
+    api.post<DoseLogRecord>("/api/v1/tracking/dose-log", body).then((r) => r.data),
+
+  list: (params?: { since?: string; supplement_key?: string }) =>
+    api
+      .get<DoseLogRecord[]>("/api/v1/tracking/dose-log", { params })
+      .then((r) => r.data),
+
+  update: (id: string, body: { dose_taken?: number; notes?: string }) =>
+    api
+      .patch<DoseLogRecord>(`/api/v1/tracking/dose-log/${id}`, body)
+      .then((r) => r.data),
+
+  delete: (id: string) =>
+    api.delete(`/api/v1/tracking/dose-log/${id}`).then((r) => r.data),
 };
 
 export default api;

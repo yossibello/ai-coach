@@ -106,6 +106,22 @@ STATEMENTS = [
     "CREATE INDEX IF NOT EXISTS ix_supp_intakes_supplement_key ON supplement_intakes(supplement_key)",
     "CREATE INDEX IF NOT EXISTS ix_supp_intakes_started_at     ON supplement_intakes(started_at)",
     "CREATE INDEX IF NOT EXISTS ix_supp_intakes_stopped_at     ON supplement_intakes(stopped_at)",
+    # Supplement dose logs (actual daily doses taken — feeds rule engine + future ML) ────────────
+    """
+    CREATE TABLE IF NOT EXISTS supplement_dose_logs (
+        id             UUID PRIMARY KEY,
+        user_id        UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        supplement_key VARCHAR(80) NOT NULL,
+        label          VARCHAR(200) NOT NULL,
+        dose_taken     FLOAT NOT NULL,
+        dose_unit      VARCHAR(40),
+        taken_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        notes          TEXT
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS ix_dose_logs_user_id        ON supplement_dose_logs(user_id)",
+    "CREATE INDEX IF NOT EXISTS ix_dose_logs_supplement_key ON supplement_dose_logs(supplement_key)",
+    "CREATE INDEX IF NOT EXISTS ix_dose_logs_taken_at       ON supplement_dose_logs(taken_at)",
 
     """
     CREATE TABLE IF NOT EXISTS performance_tests (

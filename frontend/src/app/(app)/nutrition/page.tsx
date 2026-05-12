@@ -12,22 +12,28 @@ import {
   Pill,
   TrendingUp,
   Info,
-  ExternalLink,
   Loader2,
   ClipboardList,
   Plus,
-  Activity as ActivityIcon,
+  Pencil,
   Square,
+  ShieldAlert,
+  CalendarDays,
+  ChevronDown,
+  ChevronUp,
+  Activity,
 } from "lucide-react";
 import toast from "react-hot-toast";
 import {
   nutritionAPI,
   trackingAPI,
+  doseLogAPI,
   type BloodTest,
   type SupplementItem,
   type SupplementWarning,
   type MarkerTimeSeries,
   type SupplementIntakeRecord,
+  type DoseLogRecord,
   type PerformanceTestRecord,
 } from "@/lib/api";
 import { cn } from "@/lib/utils";
@@ -36,6 +42,15 @@ type Tab = "tests" | "supplements" | "trends" | "log";
 
 export default function NutritionPage() {
   const [tab, setTab] = useState<Tab>("supplements");
+
+  // Keep supplements query alive at the page level so that when a dose is deleted
+  // from the Log tab, invalidateQueries(["supplements"]) triggers an *immediate*
+  // refetch (active subscriber) instead of just marking stale until the tab remounts.
+  useQuery({
+    queryKey: ["supplements"],
+    queryFn: () => nutritionAPI.getSupplements(),
+    staleTime: 0,
+  });
 
   return (
     <div className="p-6 space-y-6 animate-fade-in max-w-6xl">
@@ -105,14 +120,26 @@ function TabBtn({
 // ════════════════════════════════════════════════════════════════════════════
 function SupplementsTab() {
   const qc = useQueryClient();
-  const { data, isLoading } = useQuery({
+  const { data, isLoading, isFetching } = useQuery({
     queryKey: ["supplements"],
     queryFn: () => nutritionAPI.getSupplements(),
+    staleTime: 0,   // always fetch fresh on mount so dose changes reflect immediately
   });
+  // Refetch every 90 s so taken_today status stays live
+  const { data: intakes } = useQuery({
+    queryKey: ["intakes"],
+    queryFn: () => trackingAPI.listIntakes(),
+    refetchInterval: 90_000,
+  });
+  const activeKeys = new Set(
+    (intakes ?? []).filter((i) => i.is_active).map((i) => i.supplement_key)
+  );
+
   const refresh = useMutation({
     mutationFn: () => nutritionAPI.refreshSupplements(),
     onSuccess: (d) => {
       qc.setQueryData(["supplements"], d);
+      qc.invalidateQueries({ queryKey: ["supplements"] });
       toast.success("Stack refreshed");
     },
     onError: () => toast.error("Could not refresh stack"),
@@ -120,6 +147,8 @@ function SupplementsTab() {
 
   if (isLoading) return <Loading label="Computing your stack…" />;
   if (!data) return <Empty msg="No supplement data yet." />;
+  // isFetching=true means a background refetch is in progress (stale data showing)
+  const isRefreshing = isFetching && !isLoading;
 
   const { stack, warnings, has_blood_test, is_cold_start, disclaimer } = data.payload;
 
@@ -136,7 +165,7 @@ function SupplementsTab() {
           <div>
             <p className="text-sm font-medium text-white">
               {has_blood_test
-                ? "Personalized using your latest blood test"
+                ? "Personalised using your latest blood test"
                 : "General athlete recommendations (no blood test on file)"}
             </p>
             <p className="text-xs text-slate-400 mt-0.5">
@@ -147,11 +176,11 @@ function SupplementsTab() {
         </div>
         <button
           onClick={() => refresh.mutate()}
-          disabled={refresh.isPending}
+          disabled={refresh.isPending || isRefreshing}
           className="flex items-center gap-2 px-3 py-1.5 rounded-md text-sm bg-surface-muted text-slate-300 hover:text-white border border-surface-border disabled:opacity-50"
         >
-          <RefreshCw className={cn("w-3.5 h-3.5", refresh.isPending && "animate-spin")} />
-          Refresh
+          <RefreshCw className={cn("w-3.5 h-3.5", (refresh.isPending || isRefreshing) && "animate-spin")} />
+          {isRefreshing ? "Syncing…" : "Refresh"}
         </button>
       </div>
 
@@ -176,8 +205,14 @@ function SupplementsTab() {
         </div>
       ) : (
         <div className="space-y-3">
-          {stack.map((s) => (
-            <SupplementCard key={s.supplement_key} item={s} />
+          {Array.from(
+            new Map(stack.map((s) => [s.supplement_key, s])).values()
+          ).map((s) => (
+            <SupplementCard
+              key={s.supplement_key}
+              item={s}
+              alreadyLogged={activeKeys.has(s.supplement_key)}
+            />
           ))}
         </div>
       )}
@@ -190,15 +225,26 @@ function SupplementsTab() {
   );
 }
 
-function SupplementCard({ item }: { item: SupplementItem }) {
+// ─── Professional Supplement Card ────────────────────────────────────────────
+function SupplementCard({
+  item,
+  alreadyLogged,
+}: {
+  item: SupplementItem;
+  alreadyLogged: boolean;
+}) {
   const [expanded, setExpanded] = useState(false);
+  const [showDoseForm, setShowDoseForm] = useState(false);
+  const [doseInput, setDoseInput] = useState(String(item.dose ?? ""));
+  const [doseNotes, setDoseNotes] = useState("");
   const qc = useQueryClient();
-  const logIt = useMutation({
+
+  // Enrollment (start tracking) — creates intake record
+  const enroll = useMutation({
     mutationFn: async () => {
       try {
         return await trackingAPI.createIntakeFromRecommendation(item.supplement_key);
       } catch {
-        // Fallback: log directly with item data (works even without a saved recommendation)
         return await trackingAPI.createIntake({
           supplement_key: item.supplement_key,
           label: item.label,
@@ -209,12 +255,42 @@ function SupplementCard({ item }: { item: SupplementItem }) {
         });
       }
     },
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["intakes"] }),
+    onError: () => {},   // handled below
+  });
+
+  // Log a dose — creates a dose_log entry
+  const logDose = useMutation({
+    mutationFn: async (dose: number) => {
+      // If not yet enrolled, enroll first (ignore 409)
+      if (!alreadyLogged) {
+        try { await enroll.mutateAsync(); } catch { /* 409 OK */ }
+      }
+      return doseLogAPI.create({
+        supplement_key: item.supplement_key,
+        label: item.label,
+        dose_taken: dose,
+        dose_unit: item.dose_unit ?? undefined,
+        notes: doseNotes || undefined,
+      });
+    },
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["intakes"] });
-      toast.success(`Logged: ${item.label}`);
+      qc.invalidateQueries({ queryKey: ["dose-logs"] });
+      qc.invalidateQueries({ queryKey: ["supplements"] });
+      toast.success(`Logged ${doseInput} ${item.dose_unit} ${item.label}`);
+      setShowDoseForm(false);
+      setDoseNotes("");
     },
-    onError: () => toast.error("Could not log intake"),
+    onError: () => toast.error("Could not log dose"),
   });
+
+  const handleLogDose = () => {
+    const n = parseFloat(doseInput);
+    if (!n || n <= 0) { toast.error("Enter a valid dose amount"); return; }
+    logDose.mutate(n);
+  };
+
   const gradeColor =
     item.evidence_grade === "A"
       ? "bg-emerald-500/15 text-emerald-400 border-emerald-500/30"
@@ -222,87 +298,193 @@ function SupplementCard({ item }: { item: SupplementItem }) {
       ? "bg-sky-500/15 text-sky-400 border-sky-500/30"
       : "bg-amber-500/15 text-amber-400 border-amber-500/30";
 
+  const takenPct =
+    item.taken_today && item.dose
+      ? Math.min(100, ((item.today_total_dose ?? 0) / item.dose) * 100)
+      : 0;
+
   return (
-    <div className="p-4 rounded-lg bg-surface-card border border-surface-border">
-      <div className="flex items-start justify-between gap-3">
-        <div className="flex-1 min-w-0">
-          <div className="flex items-center gap-2 flex-wrap">
-            <h3 className="font-semibold text-white">{item.label}</h3>
-            <span className={cn("text-[10px] px-2 py-0.5 rounded border font-bold", gradeColor)}>
-              GRADE {item.evidence_grade}
-            </span>
-            <span className="text-[10px] px-2 py-0.5 rounded bg-surface-muted text-slate-400 border border-surface-border">
-              {item.category}
-            </span>
-          </div>
+    <div
+      className={cn(
+        "rounded-xl border bg-surface-card overflow-hidden",
+        item.dose_exceeded
+          ? "border-red-500/40"
+          : item.taken_today
+          ? "border-emerald-500/30"
+          : "border-surface-border"
+      )}
+    >
+      {/* Over-dose warning banner */}
+      {item.dose_exceeded && item.dose_warning && (
+        <div className="flex items-center gap-2 px-4 py-2 bg-red-500/10 border-b border-red-500/30">
+          <ShieldAlert className="w-4 h-4 text-red-400 flex-shrink-0" />
+          <p className="text-xs text-red-300">{item.dose_warning}</p>
+        </div>
+      )}
 
-          <div className="mt-2 grid grid-cols-2 sm:grid-cols-4 gap-3 text-sm">
-            <Stat label="Dose" value={`${item.dose} ${item.dose_unit}`} />
-            <Stat label="Frequency" value={item.frequency} />
-            <Stat label="Timing" value={item.timing} />
-            <Stat label="Duration" value={item.duration} />
-          </div>
-
-          <p className="mt-3 text-sm text-slate-300 leading-relaxed">{item.rationale}</p>
-
-          {item.warnings.length > 0 && (
-            <div className="mt-3 space-y-1">
-              {item.warnings.map((w, i) => (
-                <p key={i} className="text-xs text-amber-400 flex items-start gap-1.5">
-                  <AlertTriangle className="w-3 h-3 mt-0.5 flex-shrink-0" />
-                  <span>{w}</span>
-                </p>
-              ))}
+      <div className="p-4">
+        <div className="flex items-start justify-between gap-3">
+          {/* Left: name + metadata */}
+          <div className="flex-1 min-w-0">
+            <div className="flex items-center gap-2 flex-wrap">
+              <h3 className="font-semibold text-white">{item.label}</h3>
+              <span className={cn("text-[10px] px-2 py-0.5 rounded border font-bold", gradeColor)}>
+                GRADE {item.evidence_grade}
+              </span>
+              <span className="text-[10px] px-2 py-0.5 rounded bg-surface-muted text-slate-400 border border-surface-border">
+                {item.category}
+              </span>
             </div>
-          )}
 
-          <button
-            onClick={() => setExpanded((v) => !v)}
-            className="mt-3 text-xs text-brand-400 hover:text-brand-300"
-          >
-            {expanded ? "Hide" : "Show"} citations &amp; trigger
-          </button>
+            <div className="mt-2 grid grid-cols-2 sm:grid-cols-4 gap-3 text-sm">
+              <Stat label="Dose" value={`${item.dose} ${item.dose_unit}`} />
+              <Stat label="Frequency" value={item.frequency} />
+              <Stat label="Timing" value={item.timing} />
+              <Stat label="Duration" value={item.duration} />
+            </div>
+
+            {/* Today's progress bar */}
+            {item.taken_today && (
+              <div className="mt-3">
+                <div className="flex items-center justify-between mb-1">
+                  <span className="text-[10px] uppercase tracking-wide text-slate-500">
+                    Today&apos;s intake
+                  </span>
+                  <span
+                    className={cn(
+                      "text-xs font-medium",
+                      item.dose_exceeded ? "text-red-400" : "text-emerald-400"
+                    )}
+                  >
+                    {item.today_total_dose} / {item.dose} {item.dose_unit}
+                  </span>
+                </div>
+                <div className="h-1.5 bg-surface-muted rounded-full overflow-hidden">
+                  <div
+                    className={cn(
+                      "h-full rounded-full transition-all",
+                      item.dose_exceeded ? "bg-red-500" : "bg-emerald-500"
+                    )}
+                    style={{ width: `${Math.min(takenPct, 100)}%` }}
+                  />
+                </div>
+              </div>
+            )}
+
+            <p className="mt-3 text-sm text-slate-300 leading-relaxed">{item.rationale}</p>
+
+            {item.warnings.length > 0 && (
+              <div className="mt-3 space-y-1">
+                {item.warnings.map((w, i) => (
+                  <p key={i} className="text-xs text-amber-400 flex items-start gap-1.5">
+                    <AlertTriangle className="w-3 h-3 mt-0.5 flex-shrink-0" />
+                    <span>{w}</span>
+                  </p>
+                ))}
+              </div>
+            )}
+
+            <button
+              onClick={() => setExpanded((v) => !v)}
+              className="mt-3 text-xs text-brand-400 hover:text-brand-300 flex items-center gap-1"
+            >
+              {expanded ? <ChevronUp className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" />}
+              {expanded ? "Hide" : "Show"} citations &amp; trigger
+            </button>
+          </div>
+
+          {/* Right: action button */}
+          <div className="flex flex-col items-end gap-2 flex-shrink-0">
+            {item.taken_today && !item.dose_exceeded ? (
+              <span className="flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium bg-emerald-500/10 text-emerald-400 border border-emerald-500/30 whitespace-nowrap">
+                <CheckCircle2 className="w-3.5 h-3.5" /> Taken today
+              </span>
+            ) : null}
+            <button
+              onClick={() => {
+                setDoseInput(String(item.dose ?? ""));
+                setShowDoseForm((v) => !v);
+              }}
+              className={cn(
+                "flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium border whitespace-nowrap",
+                item.dose_exceeded
+                  ? "bg-amber-500/10 text-amber-400 border-amber-500/30 hover:bg-amber-500/20"
+                  : "bg-brand-500/10 text-brand-400 border-brand-500/30 hover:bg-brand-500/20"
+              )}
+            >
+              <Plus className="w-3.5 h-3.5" />
+              {item.dose_exceeded ? "Log anyway" : "Log a dose"}
+            </button>
+          </div>
         </div>
 
-        <button
-          onClick={() => logIt.mutate()}
-          disabled={logIt.isPending}
-          title="I'm taking this"
-          className="flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium bg-brand-500/10 hover:bg-brand-500/20 text-brand-400 border border-brand-500/30 disabled:opacity-50 self-start whitespace-nowrap"
-        >
-          {logIt.isPending ? (
-            <Loader2 className="w-3.5 h-3.5 animate-spin" />
-          ) : (
-            <Plus className="w-3.5 h-3.5" />
-          )}
-          Log it
-        </button>
+        {/* Inline dose form */}
+        {showDoseForm && (
+          <div className="mt-3 p-3 rounded-lg bg-surface-muted border border-surface-border space-y-2">
+            <p className="text-xs text-slate-400">
+              Recommended: <strong className="text-white">{item.dose} {item.dose_unit}</strong> ·
+              Adjust if you took more or less
+            </p>
+            <div className="flex items-center gap-2">
+              <input
+                type="number"
+                step="0.1"
+                min="0.01"
+                value={doseInput}
+                onChange={(e) => setDoseInput(e.target.value)}
+                className="w-24 px-2 py-1.5 rounded bg-surface-card border border-surface-border text-white text-sm focus:outline-none focus:border-brand-500"
+              />
+              <span className="text-sm text-slate-400">{item.dose_unit}</span>
+              <input
+                type="text"
+                placeholder="Notes (optional)"
+                value={doseNotes}
+                onChange={(e) => setDoseNotes(e.target.value)}
+                className="flex-1 px-2 py-1.5 rounded bg-surface-card border border-surface-border text-white text-sm placeholder-slate-600 focus:outline-none focus:border-brand-500"
+              />
+              <button
+                onClick={handleLogDose}
+                disabled={logDose.isPending}
+                className="px-3 py-1.5 rounded bg-brand-500 hover:bg-brand-400 text-white text-xs font-medium disabled:opacity-50 flex items-center gap-1"
+              >
+                {logDose.isPending ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : null}
+                Save
+              </button>
+              <button
+                onClick={() => setShowDoseForm(false)}
+                className="px-2 py-1.5 rounded text-slate-400 hover:text-white text-xs"
+              >
+                Cancel
+              </button>
+            </div>
+          </div>
+        )}
+
+        {/* Citations */}
+        {expanded && (
+          <div className="mt-3 space-y-1.5 text-xs text-slate-400 border-t border-surface-border pt-3">
+            <div>
+              <span className="text-slate-500">Triggered by: </span>
+              {item.triggered_by.join(", ")}
+            </div>
+            <div>
+              <span className="text-slate-500">Score: </span>
+              {item.score.toFixed(2)}
+            </div>
+            <div>
+              <span className="text-slate-500">Citations:</span>
+              <ul className="mt-0.5 ml-4 list-disc space-y-0.5">
+                {item.citations.map((c, i) => (
+                  <li key={i}>{c}</li>
+                ))}
+              </ul>
+            </div>
+          </div>
+        )}
       </div>
-
-      {expanded && (
-            <div className="mt-2 space-y-1.5 text-xs text-slate-400">
-              <div>
-                <span className="text-slate-500">Triggered by: </span>
-                {item.triggered_by.join(", ")}
-              </div>
-              <div>
-                <span className="text-slate-500">Score: </span>
-                {item.score.toFixed(2)}
-              </div>
-              <div>
-                <span className="text-slate-500">Citations:</span>
-                <ul className="mt-0.5 ml-4 list-disc space-y-0.5">
-                  {item.citations.map((c, i) => (
-                    <li key={i}>{c}</li>
-                  ))}
-                </ul>
-              </div>
-            </div>
-          )}
-        </div>
+    </div>
   );
 }
-
 function Stat({ label, value }: { label: string; value: string }) {
   return (
     <div>
@@ -705,12 +887,17 @@ function LogTab() {
   );
 }
 
-// ── Active supplement intake ────────────────────────────────────────────────
+// ── Active supplement intake + Dose Log ────────────────────────────────────
 function ActiveStackSection() {
   const qc = useQueryClient();
   const { data: intakes, isLoading } = useQuery({
     queryKey: ["intakes"],
     queryFn: () => trackingAPI.listIntakes(),
+  });
+  const { data: doseLogs } = useQuery({
+    queryKey: ["dose-logs"],
+    queryFn: () => doseLogAPI.list({ since: new Date(Date.now() - 30 * 86400_000).toISOString() }),
+    refetchInterval: 60_000,
   });
 
   const stop = useMutation({
@@ -718,6 +905,7 @@ function ActiveStackSection() {
       trackingAPI.updateIntake(id, { stopped_at: new Date().toISOString() }),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["intakes"] });
+      qc.invalidateQueries({ queryKey: ["supplements"] });
       toast.success("Stopped");
     },
   });
@@ -732,12 +920,19 @@ function ActiveStackSection() {
     mutationFn: (id: string) => trackingAPI.deleteIntake(id),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["intakes"] });
+      qc.invalidateQueries({ queryKey: ["supplements"] });
       toast.success("Deleted");
     },
   });
 
   const active = (intakes ?? []).filter((i) => i.is_active);
   const past = (intakes ?? []).filter((i) => !i.is_active);
+
+  // Group dose logs by supplement_key for quick lookup
+  const logsByKey = (doseLogs ?? []).reduce<Record<string, DoseLogRecord[]>>((acc, log) => {
+    (acc[log.supplement_key] ??= []).push(log);
+    return acc;
+  }, {});
 
   return (
     <section className="space-y-3">
@@ -746,20 +941,21 @@ function ActiveStackSection() {
           <Pill className="w-5 h-5 text-brand-500" /> Currently Taking
         </h2>
         <p className="text-xs text-slate-500">
-          Use the &quot;Log it&quot; button on any recommended supplement to start tracking.
+          Use &quot;Log a dose&quot; on any stack card to start tracking.
         </p>
       </div>
 
       {isLoading ? (
         <Loading label="Loading log…" />
       ) : active.length === 0 ? (
-        <Empty msg="Nothing logged as active yet." />
+        <Empty msg="Nothing logged as active yet. Go to Today's Stack and click 'Log a dose'." />
       ) : (
-        <div className="space-y-2">
+        <div className="space-y-3">
           {active.map((i) => (
-            <IntakeRow
+            <IntakeCard
               key={i.id}
               intake={i}
+              doseLogs={logsByKey[i.supplement_key] ?? []}
               onStop={() => stop.mutate(i.id)}
               onDelete={() => del.mutate(i.id)}
               onAdherence={(pct) => setAdherence.mutate({ id: i.id, pct })}
@@ -771,13 +967,14 @@ function ActiveStackSection() {
       {past.length > 0 && (
         <details className="mt-4">
           <summary className="text-sm text-slate-400 cursor-pointer hover:text-white">
-            History ({past.length})
+            Past supplements ({past.length})
           </summary>
           <div className="mt-2 space-y-2">
             {past.map((i) => (
-              <IntakeRow
+              <IntakeCard
                 key={i.id}
                 intake={i}
+                doseLogs={logsByKey[i.supplement_key] ?? []}
                 onDelete={() => del.mutate(i.id)}
                 onAdherence={(pct) => setAdherence.mutate({ id: i.id, pct })}
               />
@@ -789,17 +986,24 @@ function ActiveStackSection() {
   );
 }
 
-function IntakeRow({
+function IntakeCard({
   intake,
+  doseLogs,
   onStop,
   onDelete,
   onAdherence,
 }: {
   intake: SupplementIntakeRecord;
+  doseLogs: DoseLogRecord[];
   onStop?: () => void;
   onDelete: () => void;
   onAdherence: (pct: number) => void;
 }) {
+  const qc = useQueryClient();
+  const [editingLogId, setEditingLogId] = useState<string | null>(null);
+  const [editDose, setEditDose] = useState("");
+  const [showHistory, setShowHistory] = useState(false);
+
   const days = Math.max(
     1,
     Math.round(
@@ -808,23 +1012,66 @@ function IntakeRow({
         86400000
     )
   );
+
+  // Today's total from dose logs
+  const todayStart = new Date();
+  todayStart.setHours(0, 0, 0, 0);
+  const todayLogs = doseLogs.filter((l) => new Date(l.taken_at) >= todayStart);
+  const todayTotal = todayLogs.reduce((s, l) => s + l.dose_taken, 0);
+  const recDose = intake.dose ?? 0;
+  const todayPct = recDose > 0 ? Math.min(100, (todayTotal / recDose) * 100) : 0;
+
+  const updateDose = useMutation({
+    mutationFn: ({ id, dose_taken }: { id: string; dose_taken: number }) =>
+      doseLogAPI.update(id, { dose_taken }),
+    onSuccess: async () => {
+      // Force-refetch so Today's Stack re-pulls enriched data from backend immediately
+      await Promise.all([
+        qc.refetchQueries({ queryKey: ["dose-logs"] }),
+        qc.refetchQueries({ queryKey: ["supplements"] }),
+        qc.refetchQueries({ queryKey: ["intakes"] }),
+      ]);
+      setEditingLogId(null);
+      toast.success("Dose updated");
+    },
+    onError: () => toast.error("Could not update dose"),
+  });
+
+  const deleteLog = useMutation({
+    mutationFn: (id: string) => doseLogAPI.delete(id),
+    onSuccess: async () => {
+      await Promise.all([
+        qc.refetchQueries({ queryKey: ["dose-logs"] }),
+        qc.refetchQueries({ queryKey: ["supplements"] }),
+        qc.refetchQueries({ queryKey: ["intakes"] }),
+      ]);
+    },
+  });
+
+  // Group logs by calendar day for the history view
+  const byDay = doseLogs.reduce<Record<string, DoseLogRecord[]>>((acc, log) => {
+    const day = new Date(log.taken_at).toLocaleDateString(undefined, {
+      weekday: "short", month: "short", day: "numeric",
+    });
+    (acc[day] ??= []).push(log);
+    return acc;
+  }, {});
+  const days7 = Object.entries(byDay).slice(0, 7);
+
   return (
-    <div className="p-3 rounded-lg bg-surface-card border border-surface-border">
+    <div className="p-4 rounded-xl bg-surface-card border border-surface-border space-y-3">
+      {/* Header row */}
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0">
-          <p className="text-sm text-white font-medium">{intake.label}</p>
+          <p className="text-sm text-white font-semibold">{intake.label}</p>
           <p className="text-xs text-slate-400 mt-0.5">
-            {intake.dose != null && (
-              <>
-                {intake.dose} {intake.dose_unit}
-                {intake.frequency ? ` · ${intake.frequency}` : ""} ·{" "}
-              </>
-            )}
+            {intake.dose != null && `${intake.dose} ${intake.dose_unit ?? ""} · `}
+            {intake.frequency ?? ""}{intake.timing ? ` · ${intake.timing}` : ""} ·{" "}
             {days}d {intake.is_active ? "and counting" : "total"}
             {intake.source === "recommended" ? " · from coach" : ""}
           </p>
         </div>
-        <div className="flex items-center gap-1.5">
+        <div className="flex items-center gap-1.5 flex-shrink-0">
           {intake.is_active && onStop && (
             <button
               onClick={onStop}
@@ -844,9 +1091,60 @@ function IntakeRow({
         </div>
       </div>
 
-      {/* Adherence */}
-      <div className="mt-2 flex items-center gap-2">
-        <span className="text-[10px] uppercase tracking-wide text-slate-500">
+      {/* Today's dose progress */}
+      {intake.is_active && recDose > 0 && (
+        <div>
+          <div className="flex items-center justify-between mb-1">
+            <span className="text-[10px] uppercase tracking-wide text-slate-500">Today</span>
+            <span
+              className={cn(
+                "text-xs font-medium",
+                todayTotal > recDose * 1.5
+                  ? "text-red-400"
+                  : todayTotal >= recDose * 0.9
+                  ? "text-emerald-400"
+                  : "text-slate-400"
+              )}
+            >
+              {todayTotal > 0
+                ? `${todayTotal.toFixed(1)} / ${recDose} ${intake.dose_unit ?? ""}`
+                : `Not taken yet — recommended ${recDose} ${intake.dose_unit ?? ""}`}
+            </span>
+          </div>
+          {todayTotal > 0 && (
+            <div className="h-1.5 bg-surface-muted rounded-full overflow-hidden">
+              <div
+                className={cn(
+                  "h-full rounded-full transition-all",
+                  todayTotal > recDose * 1.5 ? "bg-red-500" : "bg-emerald-500"
+                )}
+                style={{ width: `${todayPct}%` }}
+              />
+            </div>
+          )}
+          {todayLogs.length > 0 && (
+            <div className="mt-1.5 flex flex-wrap gap-1">
+              {todayLogs.map((log) => (
+                <DoseChip
+                  key={log.id}
+                  log={log}
+                  isEditing={editingLogId === log.id}
+                  editDose={editDose}
+                  onEditStart={() => { setEditingLogId(log.id); setEditDose(String(log.dose_taken)); }}
+                  onEditChange={setEditDose}
+                  onEditSave={() => updateDose.mutate({ id: log.id, dose_taken: parseFloat(editDose) })}
+                  onEditCancel={() => setEditingLogId(null)}
+                  onDelete={() => deleteLog.mutate(log.id)}
+                />
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Adherence slider */}
+      <div className="flex items-center gap-2">
+        <span className="text-[10px] uppercase tracking-wide text-slate-500 whitespace-nowrap">
           Adherence
         </span>
         <input
@@ -862,7 +1160,115 @@ function IntakeRow({
           {intake.adherence_pct ?? 100}%
         </span>
       </div>
+
+      {/* Dose history */}
+      {days7.length > 0 && (
+        <div>
+          <button
+            onClick={() => setShowHistory((v) => !v)}
+            className="flex items-center gap-1 text-xs text-slate-400 hover:text-white"
+          >
+            <CalendarDays className="w-3 h-3" />
+            {showHistory ? "Hide" : "Show"} dose history ({doseLogs.length} entries)
+          </button>
+          {showHistory && (
+            <div className="mt-2 space-y-1.5">
+              {days7.map(([day, logs]) => {
+                const dayTotal = logs.reduce((s, l) => s + l.dose_taken, 0);
+                return (
+                  <div key={day} className="flex items-start gap-3 text-xs">
+                    <span className="text-slate-500 w-28 flex-shrink-0">{day}</span>
+                    <div className="flex flex-wrap gap-1">
+                      {logs.map((log) => (
+                        <DoseChip
+                          key={log.id}
+                          log={log}
+                          isEditing={editingLogId === log.id}
+                          editDose={editDose}
+                          onEditStart={() => { setEditingLogId(log.id); setEditDose(String(log.dose_taken)); }}
+                          onEditChange={setEditDose}
+                          onEditSave={() => updateDose.mutate({ id: log.id, dose_taken: parseFloat(editDose) })}
+                          onEditCancel={() => setEditingLogId(null)}
+                          onDelete={() => deleteLog.mutate(log.id)}
+                        />
+                      ))}
+                      <span className="text-slate-500 self-center ml-1">
+                        = {dayTotal.toFixed(1)} {logs[0]?.dose_unit ?? ""}
+                      </span>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      )}
     </div>
+  );
+}
+
+// Individual dose chip — show taken dose, click to edit inline
+function DoseChip({
+  log,
+  isEditing,
+  editDose,
+  onEditStart,
+  onEditChange,
+  onEditSave,
+  onEditCancel,
+  onDelete,
+}: {
+  log: DoseLogRecord;
+  isEditing: boolean;
+  editDose: string;
+  onEditStart: () => void;
+  onEditChange: (v: string) => void;
+  onEditSave: () => void;
+  onEditCancel: () => void;
+  onDelete: () => void;
+}) {
+  const time = new Date(log.taken_at).toLocaleTimeString(undefined, {
+    hour: "2-digit", minute: "2-digit",
+  });
+
+  if (isEditing) {
+    return (
+      <span className="flex items-center gap-1 px-1.5 py-0.5 rounded bg-brand-500/15 border border-brand-500/30">
+        <input
+          type="number"
+          step="0.1"
+          min="0.01"
+          value={editDose}
+          onChange={(e) => onEditChange(e.target.value)}
+          className="w-14 bg-transparent text-white text-xs focus:outline-none"
+          autoFocus
+        />
+        <span className="text-slate-400 text-[10px]">{log.dose_unit}</span>
+        <button onClick={onEditSave} className="text-emerald-400 hover:text-emerald-300 text-[10px] ml-0.5">✓</button>
+        <button onClick={onEditCancel} className="text-slate-500 hover:text-white text-[10px]">✕</button>
+      </span>
+    );
+  }
+
+  return (
+    <span className="group flex items-center gap-1 px-2 py-0.5 rounded bg-surface-muted border border-surface-border text-xs text-slate-300">
+      <span>{log.dose_taken} {log.dose_unit}</span>
+      <span className="text-slate-500 text-[10px]">{time}</span>
+      <button
+        onClick={onEditStart}
+        className="opacity-0 group-hover:opacity-100 text-slate-400 hover:text-white transition-opacity"
+        title="Edit dose"
+      >
+        <Pencil className="w-2.5 h-2.5" />
+      </button>
+      <button
+        onClick={onDelete}
+        className="opacity-0 group-hover:opacity-100 text-slate-400 hover:text-red-400 transition-opacity"
+        title="Delete"
+      >
+        <Trash2 className="w-2.5 h-2.5" />
+      </button>
+    </span>
   );
 }
 
@@ -902,7 +1308,7 @@ function PerformanceTestsSection() {
     <section className="space-y-3">
       <div className="flex items-center justify-between">
         <h2 className="text-lg font-semibold text-white flex items-center gap-2">
-          <ActivityIcon className="w-5 h-5 text-brand-500" /> Performance Tests
+          <Activity className="w-5 h-5 text-brand-500" /> Performance Tests
         </h2>
         <button
           onClick={() => setShowForm((v) => !v)}

@@ -129,6 +129,11 @@ def train(args):
     ce_loss    = nn.CrossEntropyLoss(label_smoothing=0.1)
     mse_loss   = nn.MSELoss()
     huber_loss = nn.HuberLoss(delta=10.0)
+    # Risk losses: 3-class softmax CE for over/under/neither (mutually exclusive)
+    # and BCEWithLogits for independent injury prediction. Class weights bias
+    # toward the minority over/under classes since 'neither' dominates.
+    ce_risk_ot = nn.CrossEntropyLoss(weight=torch.tensor([1.0, 1.0, 0.5], device=device))
+    bce_risk_inj = nn.BCEWithLogitsLoss()
 
     use_amp = device.type == "cuda" and not args.no_amp
     if use_amp:
@@ -148,21 +153,35 @@ def train(args):
             x   = batch["x"].to(device)
             di  = batch["day_idx"].to(device)
             pm  = batch["padding_mask"].to(device)
+            hq  = batch.get("horizon_query")
+            if hq is not None:
+                hq = hq.to(device)
             tgt_wt  = batch["target_wt"].to(device)
             tgt_if  = batch["target_if"].to(device)
             tgt_dur = batch["target_dur"].to(device)
             tgt_ftp = batch["ftp_delta"].to(device)
+            tgt_rot = batch["target_risk_ot"].to(device)
+            tgt_rinj = batch["target_risk_inj"].to(device)
 
             optimizer.zero_grad()
             with autocast(device_type=device.type, enabled=use_amp):
-                out = model(x, di, pm)
+                out = model(x, di, pm, horizon_query=hq)
 
                 loss_wt  = ce_loss(out["workout_logits"], tgt_wt)
                 loss_if  = mse_loss(out["intensity"].squeeze(-1), tgt_if)
                 loss_dur = mse_loss(out["duration"].squeeze(-1), tgt_dur)
                 loss_ftp = huber_loss(out["ftp_delta"].squeeze(-1), tgt_ftp)
+                loss_rot  = ce_risk_ot(out["risk_ot_logits"], tgt_rot)
+                loss_rinj = bce_risk_inj(out["risk_inj_logit"].squeeze(-1), tgt_rinj)
 
-                loss = loss_wt + 0.5 * loss_if + 0.3 * loss_dur + 0.05 * loss_ftp
+                loss = (
+                    loss_wt
+                    + 0.5  * loss_if
+                    + 0.3  * loss_dur
+                    + 0.05 * loss_ftp
+                    + 0.10 * loss_rot
+                    + 0.05 * loss_rinj
+                )
 
             scaler.scale(loss).backward()
             scaler.unscale_(optimizer)
@@ -190,17 +209,24 @@ def train(args):
                 x   = batch["x"].to(device)
                 di  = batch["day_idx"].to(device)
                 pm  = batch["padding_mask"].to(device)
+                hq  = batch.get("horizon_query")
+                if hq is not None:
+                    hq = hq.to(device)
                 tgt_wt  = batch["target_wt"].to(device)
                 tgt_if  = batch["target_if"].to(device)
                 tgt_dur = batch["target_dur"].to(device)
                 tgt_ftp = batch["ftp_delta"].to(device)
+                tgt_rot = batch["target_risk_ot"].to(device)
+                tgt_rinj = batch["target_risk_inj"].to(device)
 
-                out = model(x, di, pm)
+                out = model(x, di, pm, horizon_query=hq)
                 loss = (
                     ce_loss(out["workout_logits"], tgt_wt)
                     + 0.5 * mse_loss(out["intensity"].squeeze(-1), tgt_if)
                     + 0.3 * mse_loss(out["duration"].squeeze(-1), tgt_dur)
                     + 0.05 * huber_loss(out["ftp_delta"].squeeze(-1), tgt_ftp)
+                    + 0.10 * ce_risk_ot(out["risk_ot_logits"], tgt_rot)
+                    + 0.05 * bce_risk_inj(out["risk_inj_logit"].squeeze(-1), tgt_rinj)
                 )
                 val_loss += loss.item()
                 n_val_batches += 1
@@ -239,6 +265,8 @@ def train(args):
                     "num_layers": num_layers,
                     "dim_feedforward": d_ff,
                     "dropout": args.dropout,
+                    "horizon_dim": getattr(raw_model, "horizon_proj", None) and raw_model.horizon_proj[0].in_features,
+                    "horizon_aware": True,
                 },
                 "metrics": {
                     "epoch": epoch,

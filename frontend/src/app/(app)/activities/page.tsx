@@ -128,8 +128,12 @@ export default function ActivitiesPage() {
 
   const syncLabel = isSyncing
     ? `Syncing… ${
-        [stravaTaskId && stravaSync ? `Strava ${stravaSync.progress ?? 0}/${stravaSync.total ?? "?"}` : "",
-         garminTaskId && garminSync ? `Garmin ${garminSync.progress ?? 0}/${garminSync.total ?? "?"}` : ""]
+        [stravaTaskId && stravaSync
+          ? `Strava ${stravaSync.progress ?? 0}/${stravaSync.total || "?"}`
+          : "",
+         garminTaskId && garminSync
+          ? `Garmin ${garminSync.progress ?? 0}/${garminSync.total || "?"}`
+          : ""]
           .filter(Boolean).join(" · ") || ""
       }`
     : "Sync All";

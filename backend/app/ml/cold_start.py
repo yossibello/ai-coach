@@ -165,6 +165,35 @@ def get_periodization_phase(weeks_to_event: int | None) -> str:
     return "recovery_week"
 
 
+# Event-specific schedule biases. Each maps a workout type to a preferred
+# replacement during the build/peak phase. Only applied for cold-start users;
+# the trained model picks these patterns up automatically from the synthetic
+# data (see ml/training/generate_synthetic.py).
+_EVENT_BIAS: dict[str, dict[str, str]] = {
+    # Long climbing days dominate Alps-style camps → swap intervals for
+    # sweetspot + long Z2.
+    "climbing_camp":   {"vo2max": "sweetspot", "threshold": "sweetspot", "tempo": "long_ride"},
+    "gran_fondo":      {"vo2max": "sweetspot", "threshold": "tempo"},
+    "ultra_endurance": {"vo2max": "endurance", "threshold": "tempo", "sweetspot": "endurance"},
+    "mtb_marathon":    {"threshold": "sweetspot", "tempo": "sweetspot"},
+    "stage_race":      {"vo2max": "threshold"},
+    # Short max-effort events keep VO2/sprint emphasis.
+    "crit":            {"sweetspot": "vo2max", "tempo": "vo2max"},
+    "tt":              {"vo2max": "threshold", "sweetspot": "threshold"},
+    "long_road":       {"tempo": "sweetspot"},
+    "triathlon_70_3":  {"vo2max": "threshold"},
+    "triathlon_140_6": {"vo2max": "tempo", "threshold": "sweetspot"},
+}
+
+
+def _bias_pattern_for_event(pattern: list[str], event_type: str) -> list[str]:
+    """Apply event-specific replacements to a weekly workout pattern."""
+    bias = _EVENT_BIAS.get(event_type)
+    if not bias:
+        return pattern
+    return [bias.get(w, w) for w in pattern]
+
+
 def build_cold_start_recommendation(
     profile: AthleteProfile | None,
     ctl: float,
@@ -191,6 +220,12 @@ def build_cold_start_recommendation(
 
     phase = get_periodization_phase(weeks_to_event)
     pattern = WEEKLY_PATTERNS[phase]
+
+    # Event-type bias (overlay on top of the base periodization pattern).
+    # Only applied during build/peak when the user has a real event.
+    event_type = getattr(profile, "event_type", None) if profile else None
+    if event_type and phase in ("build", "peak") and weeks_to_event and weeks_to_event <= 12:
+        pattern = _bias_pattern_for_event(pattern, event_type)
 
     # Fatigue overrides
     if tsb < -30:
