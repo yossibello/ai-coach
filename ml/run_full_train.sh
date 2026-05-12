@@ -164,7 +164,6 @@ else
     GEN_ARGS=(--athletes "$ATHLETES" --output "$DATA_FILE")
     MODE="FULL TRAINING"
 fi
-
 echo "  Mode     : $MODE"
 echo "  Athletes : $ATHLETES"
 echo "  Data     : $DATA_FILE"
@@ -179,8 +178,7 @@ if $REUSE && [[ -f "$DATA_FILE" ]]; then
     warn "Reusing existing $DATA_FILE (${SIZE_MB} MB) — pass without --reuse to regenerate"
 else
     T0=$SECONDS
-    python -m ml.training.generate_synthetic "${GEN_ARGS[@]}"
-    ok "Data generated in $(( SECONDS - T0 ))s"
+    python -m ml.training.generate_synthetic "${GEN_ARGS[@]}"    ok "Data generated in $(( SECONDS - T0 ))s"
 fi
 
 # ── Step 6: Train ─────────────────────────────────────────────────────────────

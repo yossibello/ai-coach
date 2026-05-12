@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import argparse
 import math
+import multiprocessing
 import os
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -736,17 +737,68 @@ def _simulate_athlete(
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────
-def generate(n_athletes: int, n_weeks: int | None, seed: int, output: str):
-    rng = np.random.default_rng(seed)
-    all_rows: list[dict] = []
 
-    for i in tqdm(range(n_athletes), desc="Simulating athletes"):
+def _generate_chunk(args: tuple) -> list[dict]:
+    """Worker function: simulate a contiguous slice of athlete IDs.
+
+    Called in a subprocess — each worker gets its own numpy RNG seeded
+    deterministically from the global seed + chunk index, so results are
+    reproducible regardless of how many workers are used.
+    """
+    start_id, end_id, n_weeks, base_seed = args
+    rng = np.random.default_rng(base_seed + start_id)
+    rows: list[dict] = []
+    for i in range(start_id, end_id):
         athlete = _make_athlete(rng, athlete_id=i + 1)
         if n_weeks:
             athlete.n_weeks = n_weeks
             athlete.event_week = min(athlete.event_week, n_weeks)
-        rows = _simulate_athlete(athlete, rng)
-        all_rows.extend(rows)
+        rows.extend(_simulate_athlete(athlete, rng))
+    return rows
+
+
+def generate(n_athletes: int, n_weeks: int | None, seed: int, output: str,
+             workers: int | None = None):
+    """Generate synthetic data using multiple CPU cores.
+
+    Parameters
+    ----------
+    workers : int | None
+        Number of parallel processes.  None = auto (logical CPU count – 1,
+        min 1).  Set to 1 to disable multiprocessing (simpler stack traces).
+    """
+    if workers is None:
+        workers = max(1, (multiprocessing.cpu_count() or 2) - 1)
+    workers = max(1, workers)
+
+    # Split athletes into roughly equal chunks, one per worker.
+    chunk_size = max(1, (n_athletes + workers - 1) // workers)
+    chunks = []
+    start = 0
+    while start < n_athletes:
+        end = min(start + chunk_size, n_athletes)
+        chunks.append((start, end, n_weeks, seed))
+        start = end
+
+    print(f"Generating {n_athletes:,} athletes using {len(chunks)} workers "
+          f"(~{chunk_size} athletes each) …")
+
+    if workers == 1 or len(chunks) == 1:
+        # Single-process path — keeps nice tqdm progress bar.
+        all_rows: list[dict] = []
+        for chunk in tqdm(chunks, desc="Simulating athletes (single-process)"):
+            all_rows.extend(_generate_chunk(chunk))
+    else:
+        # Multi-process path.
+        with multiprocessing.Pool(processes=workers) as pool:
+            results = list(
+                tqdm(
+                    pool.imap(_generate_chunk, chunks),
+                    total=len(chunks),
+                    desc=f"Simulating athletes ({workers} workers)",
+                )
+            )
+        all_rows = [row for chunk_rows in results for row in chunk_rows]
 
     print(f"\nTotal rides simulated: {len(all_rows):,}")
     df = pd.DataFrame(all_rows)
@@ -766,6 +818,10 @@ def generate(n_athletes: int, n_weeks: int | None, seed: int, output: str):
 
 
 if __name__ == "__main__":
+    # Required on Windows: multiprocessing spawns new interpreter instances,
+    # so the entry-point must be guarded by if __name__ == "__main__".
+    multiprocessing.freeze_support()
+
     parser = argparse.ArgumentParser(
         description="Generate synthetic cycling training data for transformer pre-training"
     )
@@ -774,5 +830,8 @@ if __name__ == "__main__":
                         help="Override weeks per athlete (default: random 40–104)")
     parser.add_argument("--output",   default="./ml/data/synthetic.parquet")
     parser.add_argument("--seed",     type=int, default=42)
+    parser.add_argument("--workers",  type=int, default=None,
+                        help="Parallel workers (default: CPU count – 1)")
     args = parser.parse_args()
-    generate(args.athletes, args.weeks, args.seed, args.output)
+    generate(args.athletes, args.weeks, args.seed, args.output, args.workers)
+
