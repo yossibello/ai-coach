@@ -143,6 +143,14 @@ def train(args):
     patience_count = 0
     os.makedirs(os.path.dirname(args.output) or ".", exist_ok=True)
 
+    steps_per_epoch = args.steps_per_epoch  # None = all batches
+    total_train_batches = len(train_loader)
+    if steps_per_epoch:
+        print(f"Steps per epoch capped at {steps_per_epoch:,} (full epoch = {total_train_batches:,} batches)")
+    else:
+        print(f"Steps per epoch: {total_train_batches:,} batches")
+    log_every = max(1, (steps_per_epoch or total_train_batches) // 10)  # print ~10x per epoch
+
     # ── Training loop ─────────────────────────────────────────────────────
     for epoch in range(1, args.epochs + 1):
         model.train()
@@ -150,6 +158,8 @@ def train(args):
         n_train_batches = 0
 
         for batch in train_loader:
+            if steps_per_epoch and n_train_batches >= steps_per_epoch:
+                break
             x   = batch["x"].to(device)
             di  = batch["day_idx"].to(device)
             pm  = batch["padding_mask"].to(device)
@@ -191,6 +201,13 @@ def train(args):
 
             train_loss += loss.item()
             n_train_batches += 1
+
+            if n_train_batches % log_every == 0:
+                print(
+                    f"  Epoch {epoch} | step {n_train_batches:,}/{steps_per_epoch or total_train_batches:,}"
+                    f" | loss {train_loss/n_train_batches:.4f}",
+                    flush=True,
+                )
 
         scheduler.step()
         avg_train = train_loss / max(1, n_train_batches)
@@ -307,9 +324,13 @@ if __name__ == "__main__":
                         help="Smaller model for quick CPU testing")
     parser.add_argument("--patience",   type=int, default=15,
                         help="Early stopping: epochs without val improvement (0=disable)")
+    parser.add_argument("--steps-per-epoch", type=int, default=None,
+                        help="Cap training steps per epoch (useful for huge datasets). Default: all batches.")
     parser.add_argument("--compile",    action="store_true",
                         help="Use torch.compile for extra GPU speed (PyTorch 2.0+)")
     parser.add_argument("--no-amp",     action="store_true",
                         help="Disable Automatic Mixed Precision even on GPU")
+    parser.add_argument("--steps-per-epoch", type=int, default=None,
+                        help="Cap training steps per epoch (useful for huge datasets). Default: all batches.")
     args = parser.parse_args()
     train(args)
