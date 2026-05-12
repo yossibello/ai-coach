@@ -295,6 +295,14 @@ def train(args):
             }
             torch.save(ckpt, args.output)
             print(f"  ✓ Saved best model → {args.output}")
+            # Auto-backup to /kaggle/working/ (safe no-op outside Kaggle)
+            import shutil as _shutil
+            _kaggle_out = "/kaggle/working/cycling_coach_best.pt"
+            try:
+                _shutil.copy(args.output, _kaggle_out)
+                print(f"  ✓ Backed up → {_kaggle_out}")
+            except Exception:
+                pass
         else:
             patience_count += 1
             if args.patience > 0 and patience_count >= args.patience:
