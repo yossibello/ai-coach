@@ -204,8 +204,10 @@ class Athlete:
     atl: float = 0.0
     # ── Power curve profile (stable per athlete) ─────────────────────────
     sprint_factor:    float = 3.0   # personal-best 5-sec W/kg ÷ FTP W/kg (1.8–5.0)
-    anaerobic_factor: float = 1.65  # personal-best 1-min W/kg ÷ FTP W/kg (1.3–2.1)
-    vo2max_factor:    float = 1.18  # personal-best 5-min W/kg ÷ FTP W/kg (1.08–1.35)
+    anaerobic_factor: float = 1.65  # personal-best 1-min W/kg ÷ FTP W/kg (1.3–2.1)  — mutable
+    vo2max_factor:    float = 1.18  # personal-best 5-min W/kg ÷ FTP W/kg (1.08–1.35) — mutable
+    anaerobic_ceiling_factor: float = 2.0   # genetic max anaerobic_factor
+    vo2max_ceiling_factor:    float = 1.30  # genetic max vo2max_factor
     # ── Health/recovery state (updated daily) ────────────────────────────
     # Plews & Buchheit (2013): each athlete has an individual HRV baseline
     # (in ms) that drifts slowly with fitness. Day-to-day RMSSD oscillates
@@ -284,6 +286,10 @@ def _make_athlete(rng: np.random.Generator, athlete_id: int) -> Athlete:
         anaerobic_factor = float(rng.uniform(1.45, 1.82))
         vo2max_factor    = float(rng.uniform(1.12, 1.28))
 
+    # Genetic ceilings: how high each factor can grow with optimal training.
+    anaerobic_ceil = float(np.clip(anaerobic_factor + rng.uniform(0.10, 0.40), anaerobic_factor + 0.05, 2.60))
+    vo2max_ceil    = float(np.clip(vo2max_factor    + rng.uniform(0.03, 0.12), vo2max_factor    + 0.02, 1.40))
+
     # Initial HRV baseline scales with fitness/recovery (typical 30–120 ms RMSSD).
     # Trained endurance athletes sit higher; older athletes lower
     # (Plews & Buchheit 2013, Aubert et al. 2003).
@@ -307,6 +313,8 @@ def _make_athlete(rng: np.random.Generator, athlete_id: int) -> Athlete:
         sprint_factor=sprint_factor,
         anaerobic_factor=anaerobic_factor,
         vo2max_factor=vo2max_factor,
+        anaerobic_ceiling_factor=anaerobic_ceil,
+        vo2max_ceiling_factor=vo2max_ceil,
         hrv_baseline=hrv_baseline,
         hrv_today=hrv_baseline,
         rhr_today=resting_hr,
@@ -644,6 +652,10 @@ def _simulate_ride(
         "pc_1min_wkg":           pc_1min_wkg,
         "pc_5min_wkg":           pc_5min_wkg,
         "pc_20min_wkg":          pc_20min_wkg,
+        # Current best capacity (personal record) — used as adaptation target.
+        # Distinct from per-ride peaks which are a noisy fraction of capacity.
+        "pc1min_capacity_wkg":   athlete.ftp / max(athlete.weight, 1.0) * athlete.anaerobic_factor,
+        "pc5min_capacity_wkg":   athlete.ftp / max(athlete.weight, 1.0) * athlete.vo2max_factor,
         # ── Risk targets (training supervision for risk heads) ──────────
         "risk_ot_class":         int(risk_ot_class),       # 0=over, 1=under, 2=neither
         "risk_inj_target":       int(risk_inj_target),     # 0/1
@@ -700,6 +712,68 @@ def _adapt_ftp(
 
     delta += float(rng.normal(0, 0.15))    # measurement noise
     return delta
+
+
+def _adapt_vo2max_factor(
+    athlete: "Athlete",
+    week_tss_by_type: dict[str, float],
+    tsb: float,
+    rng: np.random.Generator,
+) -> None:
+    """Update athlete.vo2max_factor in-place based on weekly training mix.
+
+    VO2max power / FTP ratio responds primarily to supra-threshold intervals
+    (4-6 min efforts). Timescale ~6-12 weeks. Without stimulus the ratio drifts
+    down as FTP catches up toward the VO2max ceiling.
+    """
+    tss_v   = week_tss_by_type.get("vo2max", 0.0)
+    tss_thr = week_tss_by_type.get("threshold", 0.0) * 0.25  # secondary stimulus
+
+    stimulus = min((tss_v + tss_thr) / 55.0, 1.0) * 0.007   # up to +0.007/week
+    decay    = 0.002                                           # natural compression
+
+    recovery_factor = 1.0 if tsb >= -10 else max(0.3, 1.0 + (tsb + 10) / 30)
+    net = stimulus * recovery_factor - decay
+
+    ceiling = athlete.vo2max_ceiling_factor
+    gap = max(0.0, ceiling - athlete.vo2max_factor)
+    net *= math.sqrt(gap / max(ceiling - 1.05, 0.01))         # plateau near ceiling
+
+    athlete.vo2max_factor = float(np.clip(
+        athlete.vo2max_factor + net + rng.normal(0, 0.001),
+        1.05, ceiling,
+    ))
+
+
+def _adapt_anaerobic_factor(
+    athlete: "Athlete",
+    week_tss_by_type: dict[str, float],
+    tsb: float,
+    rng: np.random.Generator,
+) -> None:
+    """Update athlete.anaerobic_factor in-place based on weekly training mix.
+
+    Peak 1-min power / FTP ratio responds to sprint and short anaerobic work.
+    Adapts faster than VO2max (~4-8 weeks) but also detrains faster — pure
+    aerobic blocks slowly compress the ratio as FTP grows without anaerobic work.
+    """
+    tss_spr = week_tss_by_type.get("sprint", 0.0)
+    tss_vo2 = week_tss_by_type.get("vo2max", 0.0) * 0.15     # secondary stimulus
+
+    stimulus = min((tss_spr + tss_vo2) / 30.0, 1.0) * 0.010  # up to +0.010/week
+    decay    = 0.003                                            # faster detraining
+
+    recovery_factor = 1.0 if tsb >= -15 else max(0.2, 1.0 + (tsb + 15) / 25)
+    net = stimulus * recovery_factor - decay
+
+    ceiling = athlete.anaerobic_ceiling_factor
+    gap = max(0.0, ceiling - athlete.anaerobic_factor)
+    net *= math.sqrt(gap / max(ceiling - 1.20, 0.01))
+
+    athlete.anaerobic_factor = float(np.clip(
+        athlete.anaerobic_factor + net + rng.normal(0, 0.001),
+        1.20, ceiling,
+    ))
 
 
 # ── Simulate one athlete ──────────────────────────────────────────────────────
@@ -787,10 +861,12 @@ def _simulate_athlete(
                 days_since_hard += 1
             rows.append(row)
 
-        # End-of-week FTP adaptation
+        # End-of-week multi-system adaptation
         tsb = ctl - atl
         delta = _adapt_ftp(athlete, week_tss_by_type, tsb, rng)
         athlete.ftp = float(np.clip(athlete.ftp + delta, 80, athlete.ftp_ceiling))
+        _adapt_vo2max_factor(athlete, week_tss_by_type, tsb, rng)
+        _adapt_anaerobic_factor(athlete, week_tss_by_type, tsb, rng)
 
         date += timedelta(days=7)
 

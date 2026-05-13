@@ -417,17 +417,27 @@ def _transformer_recommendation(
         dtype=np.float32,
     )
     workout_idx = _PP_NAMES.index(workout_type)
-    intensity_if = float(out["intensity"][0, 0])
-    duration_h = float(out["duration"][0, 0])
-    ftp_delta_pct = float(out["ftp_delta"][0, 0])
-    ctl_peak = float(out["ctl_peak"][0, 0])
-    risks_scores = out["risks"][0].numpy()  # [overtraining, undertraining, injury]
+    intensity_if    = float(out["intensity"][0, 0])
+    duration_h      = float(out["duration"][0, 0])
+    ftp_delta_pct   = float(out["ftp_delta"][0, 0])
+    pc5min_delta_pct = float(out["pc5min_delta"][0, 0]) if "pc5min_delta" in out else 0.0
+    pc1min_delta_pct = float(out["pc1min_delta"][0, 0]) if "pc1min_delta" in out else 0.0
+    ctl_peak        = float(out["ctl_peak"][0, 0])
+    risks_scores    = out["risks"][0].numpy()  # [overtraining, undertraining, injury]
 
     from app.ml.cold_start import WORKOUT_LIBRARY, _build_risks
     tmpl = WORKOUT_LIBRARY.get(workout_type, WORKOUT_LIBRARY["endurance"])
 
-    ftp = profile.ftp if profile and profile.ftp else 200
-    ftp_delta = ftp_delta_pct * ftp  # fraction → absolute watts for this rider
+    ftp    = profile.ftp if profile and profile.ftp else 200
+    weight = profile.weight_kg if profile and getattr(profile, "weight_kg", None) else 70.0
+    ftp_delta = ftp_delta_pct * ftp  # fraction → watts for this rider
+    # Capacity estimates for 1-min and 5-min (W/kg); use profile FTP/weight as proxy
+    # if individual capacity fields are not stored on the profile yet.
+    ftp_wkg = ftp / max(weight, 1.0)
+    pc5min_now_wkg = getattr(profile, "pc5min_capacity_wkg", None) or ftp_wkg * 1.18
+    pc1min_now_wkg = getattr(profile, "pc1min_capacity_wkg", None) or ftp_wkg * 1.65
+    pc5min_delta_wkg = pc5min_delta_pct * pc5min_now_wkg
+    pc1min_delta_wkg = pc1min_delta_pct * pc1min_now_wkg
     duration_minutes = max(20, min(300, int(duration_h * 60)))
 
     next_workout = {
@@ -549,8 +559,10 @@ def _transformer_recommendation(
         "insights": [],
         "forecast": {
             "weeks": 8,
-            "predicted_ftp_change_watts": round(ftp_delta, 1),
-            "predicted_ctl_peak": round(max(ctl, ctl_peak), 1),
+            "predicted_ftp_change_watts":   round(ftp_delta, 1),
+            "predicted_pc5min_change_wkg":  round(pc5min_delta_wkg, 3),
+            "predicted_pc1min_change_wkg":  round(pc1min_delta_wkg, 3),
+            "predicted_ctl_peak":           round(max(ctl, ctl_peak), 1),
             "event_readiness_pct": None,
             "confidence_interval": [round(ftp_delta - 5, 1), round(ftp_delta + 8, 1)],
         },

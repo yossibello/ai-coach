@@ -9,7 +9,7 @@ Pipeline:
        • workout-type classification (CE, label smoothing)
        • next-ride intensity factor (MSE in IF units)
        • next-ride duration in hours (MSE)
-       • 4-week FTP delta in watts (Huber)
+       • 4-week FTP / 5-min / 1-min fractional delta (goal-weighted Huber)
 
 Usage:
   # Full pre-training run on synthetic data:
@@ -47,6 +47,21 @@ from torch.utils.data import DataLoader
 
 from app.ml.model import CyclingTransformer
 from ml.training.dataset import CyclingDataset, athlete_split, collate_fn
+
+# Per-goal loss weights for [ftp_delta, pc5min_delta, pc1min_delta].
+# Indices match GOAL_TYPE_IDX in app.ml.norm:
+#   0=general_fitness  1=ftp_improvement  2=weight_loss  3=event_specific
+#   4=gran_fondo       5=criterium        6=climbing      7=triathlon
+_GOAL_WEIGHTS = torch.tensor([
+    [0.55, 0.25, 0.20],   # general_fitness  — FTP-heavy, touch all systems
+    [0.70, 0.20, 0.10],   # ftp_improvement  — pure aerobic focus
+    [0.60, 0.25, 0.15],   # weight_loss      — aerobic volume dominant
+    [0.35, 0.30, 0.35],   # event_specific   — balanced, unknown event
+    [0.55, 0.30, 0.15],   # gran_fondo       — aerobic + VO2max for climbs
+    [0.25, 0.30, 0.45],   # criterium        — anaerobic surges dominant
+    [0.50, 0.40, 0.10],   # climbing         — VO2max-limited on steep grades
+    [0.65, 0.25, 0.10],   # triathlon        — aerobic efficiency, no sprint
+], dtype=torch.float32)
 
 
 def train(args):
@@ -122,6 +137,11 @@ def train(args):
         print(f"Resumed from checkpoint: {args.checkpoint}")
 
     if n_gpus > 1:
+        # Touch each GPU before DataParallel to pre-create CUDA contexts and
+        # suppress the "no current CUDA context" cuBLAS warning on secondary GPUs.
+        for i in range(n_gpus):
+            torch.empty(1, device=f"cuda:{i}")
+        torch.cuda.set_device(0)
         model = nn.DataParallel(model)
         print(f"DataParallel across {n_gpus} GPUs — effective batch size: {args.batch_size} ({args.batch_size // n_gpus}/GPU)")
 
@@ -132,9 +152,12 @@ def train(args):
     optimizer  = AdamW(model.parameters(), lr=args.lr, weight_decay=1e-4)
     scheduler  = CosineAnnealingLR(optimizer, T_max=args.epochs, eta_min=1e-6)
     scaler     = GradScaler(device=device.type, enabled=device.type == "cuda" and not args.no_amp)
-    ce_loss    = nn.CrossEntropyLoss(label_smoothing=0.1)
-    mse_loss   = nn.MSELoss()
-    huber_loss = nn.HuberLoss(delta=10.0)
+    ce_loss       = nn.CrossEntropyLoss(label_smoothing=0.1)
+    mse_loss      = nn.MSELoss()
+    # delta=0.05: transition from L2→L1 at 5% — appropriate for fractional targets
+    huber_loss    = nn.HuberLoss(delta=0.05)
+    huber_none    = nn.HuberLoss(delta=0.05, reduction="none")  # for per-sample weighting
+    goal_w_table  = _GOAL_WEIGHTS.to(device)                    # (8, 3)
     # Risk losses: 3-class softmax CE for over/under/neither (mutually exclusive)
     # and BCEWithLogits for independent injury prediction. Class weights bias
     # toward the minority over/under classes since 'neither' dominates.
@@ -172,12 +195,18 @@ def train(args):
             hq  = batch.get("horizon_query")
             if hq is not None:
                 hq = hq.to(device)
-            tgt_wt  = batch["target_wt"].to(device)
-            tgt_if  = batch["target_if"].to(device)
-            tgt_dur = batch["target_dur"].to(device)
-            tgt_ftp = batch["ftp_delta"].to(device)
-            tgt_rot = batch["target_risk_ot"].to(device)
+            tgt_wt   = batch["target_wt"].to(device)
+            tgt_if   = batch["target_if"].to(device)
+            tgt_dur  = batch["target_dur"].to(device)
+            tgt_ftp  = batch["ftp_delta"].to(device)
+            tgt_pc5  = batch["pc5min_delta"].to(device)
+            tgt_pc1  = batch["pc1min_delta"].to(device)
+            tgt_goal = batch["goal_idx"].to(device)
+            tgt_rot  = batch["target_risk_ot"].to(device)
             tgt_rinj = batch["target_risk_inj"].to(device)
+
+            # Per-sample goal weights: (B, 3) → columns [w_ftp, w_pc5, w_pc1]
+            gw = goal_w_table[tgt_goal]   # (B, 3)
 
             optimizer.zero_grad()
             with autocast(device_type=device.type, enabled=use_amp):
@@ -186,15 +215,32 @@ def train(args):
                 loss_wt  = ce_loss(out["workout_logits"], tgt_wt)
                 loss_if  = mse_loss(out["intensity"].squeeze(-1), tgt_if)
                 loss_dur = mse_loss(out["duration"].squeeze(-1), tgt_dur)
-                loss_ftp = huber_loss(out["ftp_delta"].squeeze(-1), tgt_ftp)
                 loss_rot  = ce_risk_ot(out["risk_ot_logits"], tgt_rot)
                 loss_rinj = bce_risk_inj(out["risk_inj_logit"].squeeze(-1), tgt_rinj)
+
+                # Goal-weighted fitness losses — mask NaN for old data without capacity cols
+                pred_ftp = out["ftp_delta"].squeeze(-1)
+                pred_pc5 = out["pc5min_delta"].squeeze(-1)
+                pred_pc1 = out["pc1min_delta"].squeeze(-1)
+
+                valid_ftp = ~tgt_ftp.isnan()
+                valid_pc5 = ~tgt_pc5.isnan()
+                valid_pc1 = ~tgt_pc1.isnan()
+
+                def _wloss(pred, tgt, valid, col):
+                    if not valid.any():
+                        return torch.tensor(0.0, device=device)
+                    return (huber_none(pred[valid], tgt[valid]) * gw[valid, col]).mean()
+
+                loss_ftp = _wloss(pred_ftp, tgt_ftp, valid_ftp, 0)
+                loss_pc5 = _wloss(pred_pc5, tgt_pc5, valid_pc5, 1)
+                loss_pc1 = _wloss(pred_pc1, tgt_pc1, valid_pc1, 2)
 
                 loss = (
                     loss_wt
                     + 0.5  * loss_if
                     + 0.3  * loss_dur
-                    + 0.05 * loss_ftp
+                    + 0.10 * (loss_ftp + loss_pc5 + loss_pc1)
                     + 0.10 * loss_rot
                     + 0.05 * loss_rinj
                 )
@@ -235,19 +281,35 @@ def train(args):
                 hq  = batch.get("horizon_query")
                 if hq is not None:
                     hq = hq.to(device)
-                tgt_wt  = batch["target_wt"].to(device)
-                tgt_if  = batch["target_if"].to(device)
-                tgt_dur = batch["target_dur"].to(device)
-                tgt_ftp = batch["ftp_delta"].to(device)
-                tgt_rot = batch["target_risk_ot"].to(device)
+                tgt_wt   = batch["target_wt"].to(device)
+                tgt_if   = batch["target_if"].to(device)
+                tgt_dur  = batch["target_dur"].to(device)
+                tgt_ftp  = batch["ftp_delta"].to(device)
+                tgt_pc5  = batch["pc5min_delta"].to(device)
+                tgt_pc1  = batch["pc1min_delta"].to(device)
+                tgt_goal = batch["goal_idx"].to(device)
+                tgt_rot  = batch["target_risk_ot"].to(device)
                 tgt_rinj = batch["target_risk_inj"].to(device)
 
+                gw = goal_w_table[tgt_goal]
                 out = model(x, di, pm, horizon_query=hq)
+
+                pred_ftp = out["ftp_delta"].squeeze(-1)
+                pred_pc5 = out["pc5min_delta"].squeeze(-1)
+                pred_pc1 = out["pc1min_delta"].squeeze(-1)
+                valid_ftp = ~tgt_ftp.isnan()
+                valid_pc5 = ~tgt_pc5.isnan()
+                valid_pc1 = ~tgt_pc1.isnan()
+
+                loss_ftp_v = _wloss(pred_ftp, tgt_ftp, valid_ftp, 0)
+                loss_pc5_v = _wloss(pred_pc5, tgt_pc5, valid_pc5, 1)
+                loss_pc1_v = _wloss(pred_pc1, tgt_pc1, valid_pc1, 2)
+
                 loss = (
                     ce_loss(out["workout_logits"], tgt_wt)
-                    + 0.5 * mse_loss(out["intensity"].squeeze(-1), tgt_if)
-                    + 0.3 * mse_loss(out["duration"].squeeze(-1), tgt_dur)
-                    + 0.05 * huber_loss(out["ftp_delta"].squeeze(-1), tgt_ftp)
+                    + 0.5  * mse_loss(out["intensity"].squeeze(-1), tgt_if)
+                    + 0.3  * mse_loss(out["duration"].squeeze(-1), tgt_dur)
+                    + 0.10 * (loss_ftp_v + loss_pc5_v + loss_pc1_v)
                     + 0.10 * ce_risk_ot(out["risk_ot_logits"], tgt_rot)
                     + 0.05 * bce_risk_inj(out["risk_inj_logit"].squeeze(-1), tgt_rinj)
                 )
@@ -258,12 +320,13 @@ def train(args):
                 correct_wt += (preds == tgt_wt).sum().item()
                 total_wt += len(tgt_wt)
                 if_mae_sum += (out["intensity"].squeeze(-1) - tgt_if).abs().sum().item()
-                ftp_mae_sum += (out["ftp_delta"].squeeze(-1) - tgt_ftp).abs().sum().item()
+                if valid_ftp.any():
+                    ftp_mae_sum += (pred_ftp[valid_ftp] - tgt_ftp[valid_ftp]).abs().sum().item()
 
-        avg_val = val_loss / max(1, n_val_batches)
-        wt_acc  = correct_wt / max(1, total_wt) * 100
-        if_mae  = if_mae_sum / max(1, total_wt)
-        ftp_mae = ftp_mae_sum / max(1, total_wt)
+        avg_val  = val_loss / max(1, n_val_batches)
+        wt_acc   = correct_wt / max(1, total_wt) * 100
+        if_mae   = if_mae_sum / max(1, total_wt)
+        ftp_mae  = ftp_mae_sum / max(1, total_wt)
 
         print(
             f"Epoch {epoch:3d}/{args.epochs}  "

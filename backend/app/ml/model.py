@@ -232,8 +232,20 @@ class CyclingTransformer(nn.Module):
             nn.Sigmoid(),
         )
 
-        # 4. FTP delta in 4 weeks (watts, can be negative)
+        # 4. Fractional fitness deltas in 4 weeks (FTP, 5-min VO2max, 1-min anaerobic)
         self.ftp_delta_head = nn.Sequential(
+            nn.Linear(d_model, 64),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(64, 1),
+        )
+        self.pc5min_delta_head = nn.Sequential(
+            nn.Linear(d_model, 64),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(64, 1),
+        )
+        self.pc1min_delta_head = nn.Sequential(
             nn.Linear(d_model, 64),
             nn.GELU(),
             nn.Dropout(dropout),
@@ -353,7 +365,9 @@ class CyclingTransformer(nn.Module):
             "workout_logits": self.workout_head(last_h),        # (B, num_types)
             "intensity":      self.intensity_head(last_h) * 2,  # (B, 1) → [0, 2] IF
             "duration":       self.duration_head(last_h) * 6,   # (B, 1) → [0, 6] hours
-            "ftp_delta":      self.ftp_delta_head(last_h),      # (B, 1) fractional (e.g. 0.05 = +5%)
+            "ftp_delta":      self.ftp_delta_head(last_h),       # (B, 1) fractional
+            "pc5min_delta":   self.pc5min_delta_head(last_h),    # (B, 1) fractional VO2max
+            "pc1min_delta":   self.pc1min_delta_head(last_h),    # (B, 1) fractional anaerobic
             "ctl_peak":       self.ctl_forecast_head(last_h),   # (B, 1)
             # Training outputs (raw logits — use *_with_logits losses).
             "risk_ot_logits": risk_ot_logits,                   # (B, 3)

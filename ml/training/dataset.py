@@ -13,12 +13,14 @@ Memory model:
     materialized lazily in __getitem__. Memory ≈ N_rows × INPUT_DIM × 4 bytes.
 
 Targets per sample (predicting the NEXT activity):
-  target_wt    : workout-type class index (10)
-  target_if    : raw intensity factor of next ride          (regression)
-  target_dur   : raw duration of next ride in HOURS         (regression)
-  ftp_delta    : fractional FTP change over 4 calendar weeks:
-                 (ftp_future − ftp_now) / ftp_now  e.g. 0.05 = +5 %.
-                 Sample is dropped if no future ride exists in that horizon.
+  target_wt      : workout-type class index (10)
+  target_if      : raw intensity factor of next ride          (regression)
+  target_dur     : raw duration of next ride in HOURS         (regression)
+  ftp_delta      : fractional FTP change over 4 weeks, e.g. 0.05 = +5 %
+  pc1min_delta   : fractional 1-min power capacity change over 4 weeks
+  pc5min_delta   : fractional 5-min power capacity change over 4 weeks
+  goal_idx       : integer goal class (0-7) for goal-weighted loss weighting
+  All fractional deltas are NaN when the capacity column is absent (old data).
 """
 from __future__ import annotations
 
@@ -33,6 +35,7 @@ from torch.utils.data import Dataset
 from app.ml.model import ACTIVITY_DIM, PROFILE_DIM, INPUT_DIM, HORIZON_DIM, encode_horizon
 from app.ml.norm import (
     WORKOUT_TYPE_IDX,
+    GOAL_TYPE_IDX,
     encode_activity_dataframe,
     encode_profile_dataframe,
 )
@@ -52,10 +55,11 @@ HORIZON_WINDOW_DAYS = {
 
 @dataclass
 class _AthleteBlock:
-    start: int                # absolute row index of first ride
-    end: int                  # absolute row index of last ride + 1
-    ftp_future: np.ndarray    # raw watts: FTP measured >=28 days AFTER each row's date.
-                              # NaN where no future ride exists in horizon.
+    start: int                  # absolute row index of first ride
+    end: int                    # absolute row index of last ride + 1
+    ftp_future: np.ndarray      # FTP ≥28d ahead (watts); NaN if no future ride
+    pc1min_future: np.ndarray   # 1-min capacity W/kg ≥28d ahead; NaN if absent
+    pc5min_future: np.ndarray   # 5-min capacity W/kg ≥28d ahead; NaN if absent
 
 
 class CyclingDataset(Dataset):
@@ -92,6 +96,22 @@ class CyclingDataset(Dataset):
             df["workout_type"].fillna("endurance").astype(str)
               .map(WORKOUT_TYPE_IDX).fillna(2).to_numpy(dtype=np.int64)
         )
+        # Goal index for goal-weighted loss (0-7 matching GOAL_TYPE_IDX).
+        self.goal_idx = (
+            df["primary_goal"].fillna("general_fitness").astype(str)
+              .map(GOAL_TYPE_IDX).fillna(0).to_numpy(dtype=np.int64)
+        )
+        # Power-curve capacity columns — zeros if not present (old parquets).
+        self.pc1min_cap = (
+            df["pc1min_capacity_wkg"].fillna(0.0).to_numpy(dtype=np.float32)
+            if "pc1min_capacity_wkg" in df.columns
+            else np.zeros(len(df), dtype=np.float32)
+        )
+        self.pc5min_cap = (
+            df["pc5min_capacity_wkg"].fillna(0.0).to_numpy(dtype=np.float32)
+            if "pc5min_capacity_wkg" in df.columns
+            else np.zeros(len(df), dtype=np.float32)
+        )
         # days_to_event: raw days (0 = race day, may be NaN if no event)
         if "days_to_event" in df.columns:
             self.days_to_event = df["days_to_event"].fillna(-1).to_numpy(dtype=np.float32)
@@ -113,23 +133,35 @@ class CyclingDataset(Dataset):
         else:
             self.risk_inj = np.zeros(len(df), dtype=np.float32)
 
-        # ── Athlete blocks + per-row FTP-in-4-weeks ───────────────────────
+        # ── Athlete blocks + per-row 4-week-ahead targets ─────────────────
         self.blocks: dict[int, _AthleteBlock] = {}
         starts = []
         for athlete_id, group in df.groupby("athlete_id", sort=False):
             start = int(group.index[0])
             end = int(group.index[-1]) + 1
-            block_dates = self.dates[start:end]
-            block_ftp = self.ftp[start:end]
+            block_dates  = self.dates[start:end]
+            block_ftp    = self.ftp[start:end]
+            block_pc1min = self.pc1min_cap[start:end]
+            block_pc5min = self.pc5min_cap[start:end]
 
-            # For each ride, find first future ride at date+28d via searchsorted
+            # For each ride, find the first future ride ≥28 days ahead.
             target_dates = block_dates + np.timedelta64(FTP_FORECAST_DAYS, "D")
-            future_idx = np.searchsorted(block_dates, target_dates, side="left")
-            ftp_future_local = np.full(end - start, np.nan, dtype=np.float32)
-            valid = future_idx < (end - start)
-            ftp_future_local[valid] = block_ftp[future_idx[valid]]
+            future_idx   = np.searchsorted(block_dates, target_dates, side="left")
+            valid        = future_idx < (end - start)
+
+            ftp_future_local   = np.full(end - start, np.nan, dtype=np.float32)
+            pc1min_future_local = np.full(end - start, np.nan, dtype=np.float32)
+            pc5min_future_local = np.full(end - start, np.nan, dtype=np.float32)
+
+            ftp_future_local[valid]    = block_ftp[future_idx[valid]]
+            pc1min_future_local[valid] = block_pc1min[future_idx[valid]]
+            pc5min_future_local[valid] = block_pc5min[future_idx[valid]]
+
             self.blocks[int(athlete_id)] = _AthleteBlock(
-                start=start, end=end, ftp_future=ftp_future_local,
+                start=start, end=end,
+                ftp_future=ftp_future_local,
+                pc1min_future=pc1min_future_local,
+                pc5min_future=pc5min_future_local,
             )
             starts.append((int(athlete_id), start, end))
 
@@ -207,19 +239,34 @@ class CyclingDataset(Dataset):
             target_if = float(future_if.mean())
             target_dur = float(future_dur.mean())
 
-        # FTP delta over next 4 weeks, measured from the LAST history ride.
+        # Fractional fitness deltas over the next 4 weeks.
         history_last = end_row - 1
+        local_idx    = history_last - block.start
+
         ftp_now    = float(self.ftp[history_last])
-        ftp_future = float(block.ftp_future[history_last - block.start])
+        ftp_future = float(block.ftp_future[local_idx])
         ftp_delta  = (ftp_future - ftp_now) / max(ftp_now, 1.0)
 
-        # Risk targets reflect the rider's state at the END of the history
-        # window — the model is asked "what is the risk RIGHT NOW given
-        # everything you have seen so far?".
+        pc1min_now    = float(self.pc1min_cap[history_last])
+        pc1min_future = float(block.pc1min_future[local_idx])
+        if pc1min_now > 0.01 and not np.isnan(pc1min_future):
+            pc1min_delta = (pc1min_future - pc1min_now) / pc1min_now
+        else:
+            pc1min_delta = float("nan")
+
+        pc5min_now    = float(self.pc5min_cap[history_last])
+        pc5min_future = float(block.pc5min_future[local_idx])
+        if pc5min_now > 0.01 and not np.isnan(pc5min_future):
+            pc5min_delta = (pc5min_future - pc5min_now) / pc5min_now
+        else:
+            pc5min_delta = float("nan")
+
+        goal_idx = int(self.goal_idx[history_last])
+
+        # Risk targets reflect the rider's state at the END of the history window.
         target_risk_ot  = int(self.risk_ot[history_last])
         target_risk_inj = float(self.risk_inj[history_last])
 
-        # Encode horizon descriptor.
         horizon_vec = np.asarray(
             encode_horizon(horizon_label, horizon_days), dtype=np.float32
         )
@@ -228,11 +275,14 @@ class CyclingDataset(Dataset):
             "x": torch.from_numpy(np.ascontiguousarray(x)),
             "day_idx": torch.from_numpy(day_idx),
             "horizon_query": torch.from_numpy(horizon_vec),
-            "target_wt": torch.tensor(target_wt, dtype=torch.long),
-            "target_if": torch.tensor(target_if, dtype=torch.float32),
+            "target_wt":  torch.tensor(target_wt,  dtype=torch.long),
+            "target_if":  torch.tensor(target_if,  dtype=torch.float32),
             "target_dur": torch.tensor(target_dur, dtype=torch.float32),
-            "ftp_delta": torch.tensor(ftp_delta, dtype=torch.float32),
-            "target_risk_ot":  torch.tensor(target_risk_ot, dtype=torch.long),
+            "ftp_delta":    torch.tensor(ftp_delta,    dtype=torch.float32),
+            "pc1min_delta": torch.tensor(pc1min_delta, dtype=torch.float32),
+            "pc5min_delta": torch.tensor(pc5min_delta, dtype=torch.float32),
+            "goal_idx":     torch.tensor(goal_idx,     dtype=torch.long),
+            "target_risk_ot":  torch.tensor(target_risk_ot,  dtype=torch.long),
             "target_risk_inj": torch.tensor(target_risk_inj, dtype=torch.float32),
         }
 
@@ -247,12 +297,15 @@ def collate_fn(batch: list[dict]) -> dict:
     day_padded   = torch.zeros(B, max_len, dtype=torch.long)
     padding_mask = torch.ones(B, max_len, dtype=torch.bool)  # True = padded
 
-    targets_wt  = torch.zeros(B, dtype=torch.long)
-    targets_if  = torch.zeros(B, dtype=torch.float32)
-    targets_dur = torch.zeros(B, dtype=torch.float32)
-    ftp_delta   = torch.zeros(B, dtype=torch.float32)
-    risk_ot     = torch.full((B,), 2, dtype=torch.long)   # default "neither"
-    risk_inj    = torch.zeros(B, dtype=torch.float32)
+    targets_wt   = torch.zeros(B, dtype=torch.long)
+    targets_if   = torch.zeros(B, dtype=torch.float32)
+    targets_dur  = torch.zeros(B, dtype=torch.float32)
+    ftp_delta    = torch.full((B,), float("nan"), dtype=torch.float32)
+    pc1min_delta = torch.full((B,), float("nan"), dtype=torch.float32)
+    pc5min_delta = torch.full((B,), float("nan"), dtype=torch.float32)
+    goal_idx     = torch.zeros(B, dtype=torch.long)
+    risk_ot      = torch.full((B,), 2, dtype=torch.long)   # default "neither"
+    risk_inj     = torch.zeros(B, dtype=torch.float32)
     has_horizon = "horizon_query" in batch[0]
     if has_horizon:
         horizon_dim = batch[0]["horizon_query"].shape[0]
@@ -263,10 +316,13 @@ def collate_fn(batch: list[dict]) -> dict:
         x_padded[i, :T] = item["x"]
         day_padded[i, :T] = item["day_idx"]
         padding_mask[i, :T] = False
-        targets_wt[i]  = item["target_wt"]
-        targets_if[i]  = item["target_if"]
-        targets_dur[i] = item["target_dur"]
-        ftp_delta[i]   = item["ftp_delta"]
+        targets_wt[i]   = item["target_wt"]
+        targets_if[i]   = item["target_if"]
+        targets_dur[i]  = item["target_dur"]
+        ftp_delta[i]    = item["ftp_delta"]
+        pc1min_delta[i] = item["pc1min_delta"]
+        pc5min_delta[i] = item["pc5min_delta"]
+        goal_idx[i]     = item["goal_idx"]
         if "target_risk_ot" in item:
             risk_ot[i]  = item["target_risk_ot"]
         if "target_risk_inj" in item:
@@ -278,10 +334,13 @@ def collate_fn(batch: list[dict]) -> dict:
         "x": x_padded,
         "day_idx": day_padded,
         "padding_mask": padding_mask,
-        "target_wt": targets_wt,
-        "target_if": targets_if,
+        "target_wt":  targets_wt,
+        "target_if":  targets_if,
         "target_dur": targets_dur,
-        "ftp_delta": ftp_delta,
+        "ftp_delta":    ftp_delta,
+        "pc1min_delta": pc1min_delta,
+        "pc5min_delta": pc5min_delta,
+        "goal_idx":     goal_idx,
         "target_risk_ot":  risk_ot,
         "target_risk_inj": risk_inj,
     }
