@@ -62,6 +62,13 @@ ACTIVITY_FEATURES = [
     "rhr_delta_norm",     # delta vs 30d baseline RHR, mapped to [0,1]
     "sleep_score_norm",   # Garmin sleep score 0–100 → [0,1]
     "body_battery_norm",  # Garmin body battery 0–100 → [0,1]
+    # ── Power curve (peak W/kg achieved at each duration in THIS workout) ──
+    # Captures athlete TYPE (sprinter vs climber) independently of current FTP.
+    # Missing = 0 (no power meter / rest day).
+    "pc_5s_wkg",    # best 5-second power  W/kg
+    "pc_1min_wkg",  # best 1-minute power  W/kg
+    "pc_5min_wkg",  # best 5-minute power  W/kg  (VO2max proxy)
+    "pc_20min_wkg", # best 20-minute power W/kg  (FTP proxy)
 ]
 
 ACTIVITY_DIM = len(ACTIVITY_FEATURES)  # ~46

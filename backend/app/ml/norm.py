@@ -71,6 +71,11 @@ NORM_BOUNDS: dict[str, tuple[float, float]] = {
     "rhr_delta":         (-10.0, 15.0),  # bpm vs 30d baseline (Buchheit 2014)
     "sleep_score":       (0.0, 100.0),
     "body_battery":      (0.0, 100.0),
+    # Power curve (peak W/kg per duration — 0 = not recorded / rest day)
+    "pc_5s_wkg":         (0.0, 25.0),   # neuromuscular peak; track sprinters ~25+
+    "pc_1min_wkg":       (0.0, 12.0),   # anaerobic capacity
+    "pc_5min_wkg":       (0.0, 9.0),    # VO2max power proxy
+    "pc_20min_wkg":      (0.0, 7.5),    # FTP proxy (≈ 105% of FTP W/kg)
     # Profile
     "age":               (15.0, 80.0),
     "weight_kg":         (40.0, 120.0),
@@ -216,6 +221,11 @@ def encode_activity_row(
         n01(rhr_delta, "rhr_delta"),
         n01(sleep_score, "sleep_score"),
         n01(body_battery, "body_battery"),
+        # Power curve
+        n01(g("pc_5s_wkg",    0.0), "pc_5s_wkg"),
+        n01(g("pc_1min_wkg",  0.0), "pc_1min_wkg"),
+        n01(g("pc_5min_wkg",  0.0), "pc_5min_wkg"),
+        n01(g("pc_20min_wkg", 0.0), "pc_20min_wkg"),
     ]
     arr = np.asarray(vec, dtype=np.float32)
     assert arr.shape[0] == ACTIVITY_DIM, (
@@ -328,6 +338,18 @@ def encode_activity_dataframe(df) -> np.ndarray:
     cols.append(_norm_array(rhr_d_arr, "rhr_delta"))
     cols.append(_norm_array(sleep_arr, "sleep_score"))
     cols.append(_norm_array(bb_arr, "body_battery"))
+
+    # ── Power curve (defaults to 0 when column absent or no power meter) ──
+    for col, key in [
+        ("pc_5s_wkg",    "pc_5s_wkg"),
+        ("pc_1min_wkg",  "pc_1min_wkg"),
+        ("pc_5min_wkg",  "pc_5min_wkg"),
+        ("pc_20min_wkg", "pc_20min_wkg"),
+    ]:
+        arr = (df[col].fillna(0.0).to_numpy(dtype=np.float32)
+               if col in df.columns
+               else np.zeros(len(df), dtype=np.float32))
+        cols.append(_norm_array(arr, key))
 
     out = np.stack(cols, axis=1).astype(np.float32)
     assert out.shape[1] == ACTIVITY_DIM, f"got {out.shape[1]} cols, expected {ACTIVITY_DIM}"

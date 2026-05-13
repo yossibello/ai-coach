@@ -202,6 +202,10 @@ class Athlete:
     start_date: datetime
     ctl: float = 0.0
     atl: float = 0.0
+    # ── Power curve profile (stable per athlete) ─────────────────────────
+    sprint_factor:    float = 3.0   # personal-best 5-sec W/kg ÷ FTP W/kg (1.8–5.0)
+    anaerobic_factor: float = 1.65  # personal-best 1-min W/kg ÷ FTP W/kg (1.3–2.1)
+    vo2max_factor:    float = 1.18  # personal-best 5-min W/kg ÷ FTP W/kg (1.08–1.35)
     # ── Health/recovery state (updated daily) ────────────────────────────
     # Plews & Buchheit (2013): each athlete has an individual HRV baseline
     # (in ms) that drifts slowly with fitness. Day-to-day RMSSD oscillates
@@ -265,6 +269,21 @@ def _make_athlete(rng: np.random.Generator, athlete_id: int) -> Athlete:
     start_date = datetime(2021, 1, 1) + timedelta(days=int(rng.integers(0, 365 * 4)))
     ctl = float(rng.uniform(8, 45))
 
+    # Power curve profile: sprint/anaerobic factors capture fast-twitch fraction;
+    # vo2max factor captures VO2max:FTP ratio. Both are weakly correlated with goal.
+    if goal_str == "criterium":
+        sprint_factor    = float(rng.uniform(3.2, 5.0))
+        anaerobic_factor = float(rng.uniform(1.65, 2.10))
+        vo2max_factor    = float(rng.uniform(1.10, 1.20))
+    elif goal_str in ("climbing", "triathlon"):
+        sprint_factor    = float(rng.uniform(1.8, 2.8))
+        anaerobic_factor = float(rng.uniform(1.30, 1.60))
+        vo2max_factor    = float(rng.uniform(1.18, 1.35))
+    else:
+        sprint_factor    = float(rng.uniform(2.2, 3.8))
+        anaerobic_factor = float(rng.uniform(1.45, 1.82))
+        vo2max_factor    = float(rng.uniform(1.12, 1.28))
+
     # Initial HRV baseline scales with fitness/recovery (typical 30–120 ms RMSSD).
     # Trained endurance athletes sit higher; older athletes lower
     # (Plews & Buchheit 2013, Aubert et al. 2003).
@@ -285,6 +304,9 @@ def _make_athlete(rng: np.random.Generator, athlete_id: int) -> Athlete:
         n_weeks=n_weeks, event_week=event_week,
         start_date=start_date,
         ctl=ctl, atl=ctl * float(rng.uniform(0.85, 1.15)),
+        sprint_factor=sprint_factor,
+        anaerobic_factor=anaerobic_factor,
+        vo2max_factor=vo2max_factor,
         hrv_baseline=hrv_baseline,
         hrv_today=hrv_baseline,
         rhr_today=resting_hr,
@@ -341,6 +363,23 @@ def _apply_event_bias(weekly_wts: list[str], event_type: str | None, phase: str)
 #     to baseline with rest.
 #   • Vesterinen et al. (2016) — fitter athletes have higher Ln(RMSSD) baselines.
 # Returned values are RAW (ms / bpm / 0–100) so the encoder will normalize.
+
+# Fraction of personal-best power curve achieved at each duration in each
+# workout type: (5s_range, 1min_range, 5min_range, 20min_range).
+# Reflects what portion of the athlete's neuromuscular/aerobic ceiling is
+# actually expressed during a given session type.
+_PC_EFFORT: dict[str, tuple] = {
+    "recovery":  ((0.10, 0.25), (0.10, 0.22), (0.15, 0.30), (0.28, 0.45)),
+    "easy":      ((0.15, 0.30), (0.18, 0.30), (0.28, 0.45), (0.45, 0.62)),
+    "endurance": ((0.15, 0.30), (0.20, 0.35), (0.38, 0.58), (0.58, 0.75)),
+    "tempo":     ((0.20, 0.38), (0.30, 0.48), (0.58, 0.75), (0.75, 0.90)),
+    "sweetspot": ((0.20, 0.38), (0.30, 0.48), (0.65, 0.82), (0.85, 0.97)),
+    "threshold": ((0.20, 0.38), (0.32, 0.50), (0.75, 0.92), (0.92, 1.00)),
+    "vo2max":    ((0.35, 0.62), (0.62, 0.85), (0.85, 1.00), (0.72, 0.88)),
+    "sprint":    ((0.80, 1.00), (0.75, 0.98), (0.45, 0.65), (0.48, 0.65)),
+    "race":      ((0.55, 0.88), (0.65, 0.88), (0.80, 0.98), (0.85, 0.98)),
+    "long_ride": ((0.12, 0.28), (0.18, 0.30), (0.35, 0.52), (0.55, 0.72)),
+}
 
 # Per-workout autonomic stress (relative units; calibrated against
 # Stanley 2013 figure 1 recovery curves).
@@ -521,6 +560,22 @@ def _simulate_ride(
     if rng.random() < 0.02:    # baseline illness/injury surprise
         risk_inj_target = 1
 
+    # Power curve: peak W/kg achieved at each duration in THIS workout.
+    # Personal bests (pb_*) are athlete constants; per-workout values are a
+    # fraction of the pb, scaled by workout type (sprint → high 5s, threshold
+    # → high 20min, etc.).
+    ftp_wkg  = athlete.ftp / max(athlete.weight, 1.0)
+    pb_5s    = ftp_wkg * athlete.sprint_factor
+    pb_1min  = ftp_wkg * athlete.anaerobic_factor
+    pb_5min  = ftp_wkg * athlete.vo2max_factor
+    pb_20min = ftp_wkg * 1.05  # 20-min ≈ 105% of FTP W/kg
+
+    ef = _PC_EFFORT.get(wt, ((0.20, 0.40), (0.30, 0.50), (0.50, 0.70), (0.60, 0.80)))
+    pc_5s_wkg    = float(rng.uniform(pb_5s    * ef[0][0], pb_5s    * ef[0][1]))
+    pc_1min_wkg  = float(rng.uniform(pb_1min  * ef[1][0], pb_1min  * ef[1][1]))
+    pc_5min_wkg  = float(rng.uniform(pb_5min  * ef[2][0], pb_5min  * ef[2][1]))
+    pc_20min_wkg = float(rng.uniform(pb_20min * ef[3][0], pb_20min * ef[3][1]))
+
     raw = {
         # identification / target labels
         "athlete_id":            athlete.athlete_id,
@@ -584,6 +639,11 @@ def _simulate_ride(
         ),
         "sleep_score":           sleep_score,
         "body_battery":          body_battery,
+        # ── Power curve (peak W/kg per duration in this workout) ───────
+        "pc_5s_wkg":             pc_5s_wkg,
+        "pc_1min_wkg":           pc_1min_wkg,
+        "pc_5min_wkg":           pc_5min_wkg,
+        "pc_20min_wkg":          pc_20min_wkg,
         # ── Risk targets (training supervision for risk heads) ──────────
         "risk_ot_class":         int(risk_ot_class),       # 0=over, 1=under, 2=neither
         "risk_inj_target":       int(risk_inj_target),     # 0/1
