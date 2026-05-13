@@ -77,7 +77,6 @@ class CyclingDataset(Dataset):
             df = df[df["athlete_id"].isin(set(athlete_ids))]
 
         df = df.sort_values(["athlete_id", "date"]).reset_index(drop=True)
-        self.df = df
         self.seq_len = seq_len
         self.horizon_aware = horizon_aware
 
@@ -168,13 +167,15 @@ class CyclingDataset(Dataset):
             )
             starts.append((int(athlete_id), start, end))
 
-        # ── Build sample index: (athlete_id, end_row, horizon_label, horizon_days) ─
-        # `end_row` is the absolute index of the FIRST future ride. The history
-        # is [start, end_row). For each base anchor we emit up to 3 samples
-        # corresponding to short/medium/event horizons, each carrying a
-        # horizon-specific target (the modal workout type of the future window
-        # and its mean IF/duration).
-        self.samples: list[tuple[int, int, str, float]] = []
+        # ── Build sample index ────────────────────────────────────────────
+        # Stored as 4 compact numpy arrays instead of a list of Python tuples.
+        # Python tuples cost ~200 bytes each; numpy int32/float32 costs 4 bytes.
+        # For 12M samples this saves ~6 GB of RAM.
+        # horizon_idx encoding: 0=short (7d), 1=medium (28d), 2=event (dte days)
+        _sa: list[int]   = []  # athlete_id
+        _se: list[int]   = []  # end_row
+        _sh: list[int]   = []  # horizon_idx
+        _sd: list[float] = []  # horizon_days
         for athlete_id, start, end in starts:
             block = self.blocks[athlete_id]
             for end_row in range(start + min_history, end):
@@ -183,23 +184,38 @@ class CyclingDataset(Dataset):
                     continue  # no FTP measurement 4w ahead → drop sample
 
                 if not self.horizon_aware:
-                    self.samples.append((athlete_id, end_row, "short", 7.0))
+                    _sa.append(athlete_id); _se.append(end_row)
+                    _sh.append(0);          _sd.append(7.0)
                     continue
 
-                # Always emit short + medium horizons.
-                self.samples.append((athlete_id, end_row, "short", 7.0))
-                self.samples.append((athlete_id, end_row, "medium", 28.0))
-                # Emit event horizon only if a real event is upcoming.
+                _sa.append(athlete_id); _se.append(end_row)
+                _sh.append(0);          _sd.append(7.0)
+                _sa.append(athlete_id); _se.append(end_row)
+                _sh.append(1);          _sd.append(28.0)
                 dte = float(self.days_to_event[history_last])
                 if dte > 0 and dte <= 200:
-                    self.samples.append((athlete_id, end_row, "event", dte))
+                    _sa.append(athlete_id); _se.append(end_row)
+                    _sh.append(2);          _sd.append(dte)
+
+        self._s_athlete  = np.array(_sa, dtype=np.int32)
+        self._s_end_row  = np.array(_se, dtype=np.int32)
+        self._s_h_idx    = np.array(_sh, dtype=np.uint8)
+        self._s_h_days   = np.array(_sd, dtype=np.float32)
+        # Release the DataFrame — all needed data is in the arrays above.
+        # This frees ~3 GB for 50K athletes.
+        del df
+
+    _HORIZON_LABELS = ("short", "medium", "event")
 
     # ──────────────────────────────────────────────────────────────────────
     def __len__(self) -> int:
-        return len(self.samples)
+        return len(self._s_athlete)
 
     def __getitem__(self, idx: int) -> dict:
-        athlete_id, end_row, horizon_label, horizon_days = self.samples[idx]
+        athlete_id    = int(self._s_athlete[idx])
+        end_row       = int(self._s_end_row[idx])
+        horizon_label = self._HORIZON_LABELS[int(self._s_h_idx[idx])]
+        horizon_days  = float(self._s_h_days[idx])
         block = self.blocks[athlete_id]
 
         win_start = max(block.start, end_row - self.seq_len)

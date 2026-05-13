@@ -87,6 +87,7 @@ def train(args):
 
     train_ds = CyclingDataset(df, seq_len=args.seq_len, athlete_ids=train_ids)
     val_ds   = CyclingDataset(df, seq_len=args.seq_len, athlete_ids=val_ids)
+    del df   # release the ~3 GB DataFrame — all needed data is now in the datasets
     print(f"Train sequences: {len(train_ds):,}  Val sequences: {len(val_ds):,}")
 
     # Allow override via env var for high-core-count machines (default: 8 on GPU)
