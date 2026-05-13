@@ -55,9 +55,11 @@ def train(args):
     print(f"PyTorch threads: {n_threads}")
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"Training on: {device}")
+    n_gpus = torch.cuda.device_count() if device.type == "cuda" else 1
+    print(f"Training on: {device}  ({n_gpus} GPU{'s' if n_gpus > 1 else ''})")
     if device.type == "cuda":
-        print(f"  GPU: {torch.cuda.get_device_name(0)}  VRAM: {torch.cuda.get_device_properties(0).total_memory / 1e9:.1f} GB")
+        for i in range(n_gpus):
+            print(f"  GPU {i}: {torch.cuda.get_device_name(i)}  VRAM: {torch.cuda.get_device_properties(i).total_memory / 1e9:.1f} GB")
 
     # ── Load data ─────────────────────────────────────────────────────────
     print(f"Loading data from {args.data}…")
@@ -118,6 +120,10 @@ def train(args):
         state = torch.load(args.checkpoint, map_location=device)
         model.load_state_dict(state)
         print(f"Resumed from checkpoint: {args.checkpoint}")
+
+    if n_gpus > 1:
+        model = nn.DataParallel(model)
+        print(f"DataParallel across {n_gpus} GPUs — effective batch size: {args.batch_size} ({args.batch_size // n_gpus}/GPU)")
 
     total_params = sum(p.numel() for p in model.parameters())
     print(f"Model parameters: {total_params:,}")
@@ -263,7 +269,7 @@ def train(args):
             f"Epoch {epoch:3d}/{args.epochs}  "
             f"train={avg_train:.4f}  val={avg_val:.4f}  "
             f"wt_acc={wt_acc:.1f}%  IF_MAE={if_mae:.3f}  "
-            f"FTPΔ_MAE={ftp_mae:.1f}W  lr={scheduler.get_last_lr()[0]:.2e}"
+            f"FTPΔ_MAE={ftp_mae*100:.2f}%  lr={scheduler.get_last_lr()[0]:.2e}"
         )
 
         if avg_val < best_val_loss:
@@ -272,7 +278,11 @@ def train(args):
             # Save state_dict + model config so inference can rebuild the
             # exact same architecture (otherwise dim mismatches silently
             # fall back to cold-start).
-            raw_model = model._orig_mod if hasattr(model, "_orig_mod") else model
+            raw_model = model
+            if hasattr(raw_model, "_orig_mod"):       # torch.compile wrapper
+                raw_model = raw_model._orig_mod
+            if isinstance(raw_model, nn.DataParallel): # DataParallel wrapper
+                raw_model = raw_model.module
             ckpt = {
                 "state_dict": raw_model.state_dict(),
                 "config": {

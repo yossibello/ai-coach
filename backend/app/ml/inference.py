@@ -419,7 +419,7 @@ def _transformer_recommendation(
     workout_idx = _PP_NAMES.index(workout_type)
     intensity_if = float(out["intensity"][0, 0])
     duration_h = float(out["duration"][0, 0])
-    ftp_delta = float(out["ftp_delta"][0, 0])
+    ftp_delta_pct = float(out["ftp_delta"][0, 0])
     ctl_peak = float(out["ctl_peak"][0, 0])
     risks_scores = out["risks"][0].numpy()  # [overtraining, undertraining, injury]
 
@@ -427,6 +427,7 @@ def _transformer_recommendation(
     tmpl = WORKOUT_LIBRARY.get(workout_type, WORKOUT_LIBRARY["endurance"])
 
     ftp = profile.ftp if profile and profile.ftp else 200
+    ftp_delta = ftp_delta_pct * ftp  # fraction → absolute watts for this rider
     duration_minutes = max(20, min(300, int(duration_h * 60)))
 
     next_workout = {

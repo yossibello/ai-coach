@@ -16,9 +16,9 @@ Targets per sample (predicting the NEXT activity):
   target_wt    : workout-type class index (10)
   target_if    : raw intensity factor of next ride          (regression)
   target_dur   : raw duration of next ride in HOURS         (regression)
-  ftp_delta    : (FTP four CALENDAR weeks after window) − (FTP at window end)
-                 in WATTS. Sample is dropped if no future ride exists in that
-                 horizon — keeps the regression target meaningful.
+  ftp_delta    : fractional FTP change over 4 calendar weeks:
+                 (ftp_future − ftp_now) / ftp_now  e.g. 0.05 = +5 %.
+                 Sample is dropped if no future ride exists in that horizon.
 """
 from __future__ import annotations
 
@@ -211,7 +211,7 @@ class CyclingDataset(Dataset):
         history_last = end_row - 1
         ftp_now    = float(self.ftp[history_last])
         ftp_future = float(block.ftp_future[history_last - block.start])
-        ftp_delta  = ftp_future - ftp_now
+        ftp_delta  = (ftp_future - ftp_now) / max(ftp_now, 1.0)
 
         # Risk targets reflect the rider's state at the END of the history
         # window — the model is asked "what is the risk RIGHT NOW given
