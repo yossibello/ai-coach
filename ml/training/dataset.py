@@ -84,7 +84,10 @@ class CyclingDataset(Dataset):
         # ── Pre-normalize the entire dataframe ────────────────────────────
         act_mat = encode_activity_dataframe(df)        # (N, ACTIVITY_DIM)
         prof_mat = encode_profile_dataframe(df)        # (N, PROFILE_DIM)
-        self.tokens = np.concatenate([act_mat, prof_mat], axis=1).astype(np.float32)
+        # Store as float16 (values are in [0,1]/[-1,1] so precision is fine).
+        # Halves the matrix from ~2.9 GB → ~1.5 GB for 50K athletes, which
+        # prevents OOM when DataLoader workers fork and trigger copy-on-write.
+        self.tokens = np.concatenate([act_mat, prof_mat], axis=1).astype(np.float16)
         assert self.tokens.shape[1] == INPUT_DIM
 
         # ── Per-row scalar arrays for fast lookup ─────────────────────────
@@ -200,7 +203,7 @@ class CyclingDataset(Dataset):
         block = self.blocks[athlete_id]
 
         win_start = max(block.start, end_row - self.seq_len)
-        x = self.tokens[win_start:end_row]                  # (T, INPUT_DIM)
+        x = self.tokens[win_start:end_row].astype(np.float32)  # float16→float32 for model
 
         # day index = days since first token in window
         win_dates = self.dates[win_start:end_row]

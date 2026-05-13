@@ -90,7 +90,10 @@ def train(args):
     print(f"Train sequences: {len(train_ds):,}  Val sequences: {len(val_ds):,}")
 
     # Allow override via env var for high-core-count machines (default: 8 on GPU)
-    _default_workers = 8 if device.type == "cuda" else min(2, n_threads)
+    # 4 workers instead of 8: halves fork copy-on-write memory pressure on the
+    # token matrix (~1.5 GB float16 × 4 = 6 GB vs × 8 = 12 GB) — avoids OOM
+    # on Kaggle T4 x2 (29 GB RAM) with 50K athletes.
+    _default_workers = 4 if device.type == "cuda" else min(2, n_threads)
     n_workers_train = int(os.environ.get("DATALOADER_WORKERS", min(_default_workers, n_threads)))
     n_workers_val   = max(1, n_workers_train // 2)
     train_loader = DataLoader(
