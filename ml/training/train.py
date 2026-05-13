@@ -150,10 +150,14 @@ def train(args):
         print(f"Resumed from checkpoint: {args.checkpoint}")
 
     if n_gpus > 1:
-        # Touch each GPU before DataParallel to pre-create CUDA contexts and
-        # suppress the "no current CUDA context" cuBLAS warning on secondary GPUs.
+        # Force cuBLAS handle creation on every GPU before DataParallel spawns
+        # its internal threads. torch.empty() only allocates; a real matmul is
+        # needed to actually initialise the cuBLAS context on each device.
         for i in range(n_gpus):
-            torch.empty(1, device=f"cuda:{i}")
+            with torch.cuda.device(i):
+                d = torch.randn(8, 8, device=f"cuda:{i}")
+                _ = d @ d
+                del d
         torch.cuda.set_device(0)
         model = nn.DataParallel(model)
         print(f"DataParallel across {n_gpus} GPUs — effective batch size: {args.batch_size} ({args.batch_size // n_gpus}/GPU)")
