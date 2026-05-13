@@ -72,22 +72,25 @@ class CyclingDataset(Dataset):
         min_history: int = 10,
         athlete_ids: Iterable[int] | None = None,
         horizon_aware: bool = True,
+        already_sorted: bool = False,
     ):
         if athlete_ids is not None:
             df = df[df["athlete_id"].isin(set(athlete_ids))]
 
-        df = df.sort_values(["athlete_id", "date"]).reset_index(drop=True)
+        if not already_sorted:
+            df = df.sort_values(["athlete_id", "date"]).reset_index(drop=True)
         self.seq_len = seq_len
         self.horizon_aware = horizon_aware
 
         # ── Pre-normalize the entire dataframe ────────────────────────────
-        act_mat = encode_activity_dataframe(df)        # (N, ACTIVITY_DIM)
-        prof_mat = encode_profile_dataframe(df)        # (N, PROFILE_DIM)
-        # Store as float16 (values are in [0,1]/[-1,1] so precision is fine).
-        # Halves the matrix from ~2.9 GB → ~1.5 GB for 50K athletes, which
-        # prevents OOM when DataLoader workers fork and trigger copy-on-write.
-        self.tokens = np.concatenate([act_mat, prof_mat], axis=1).astype(np.float16)
-        assert self.tokens.shape[1] == INPUT_DIM
+        act_mat  = encode_activity_dataframe(df)   # (N, ACTIVITY_DIM) float32
+        prof_mat = encode_profile_dataframe(df)    # (N, PROFILE_DIM)  float32
+        # Allocate float16 directly and copy column-wise — avoids the 2.6 GB
+        # temporary float32 concat that np.concatenate(...).astype(float16) creates.
+        N = len(df)
+        self.tokens = np.empty((N, INPUT_DIM), dtype=np.float16)
+        self.tokens[:, :ACTIVITY_DIM] = act_mat;  del act_mat
+        self.tokens[:, ACTIVITY_DIM:] = prof_mat; del prof_mat
 
         # ── Per-row scalar arrays for fast lookup ─────────────────────────
         self.dates = df["date"].to_numpy(dtype="datetime64[ns]")

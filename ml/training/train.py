@@ -85,9 +85,18 @@ def train(args):
     train_ids, val_ids = athlete_split(df, val_frac=args.val_frac, seed=args.seed)
     print(f"Train athletes: {len(train_ids):,}  Val athletes: {len(val_ids):,}")
 
-    train_ds = CyclingDataset(df, seq_len=args.seq_len, athlete_ids=train_ids)
-    val_ds   = CyclingDataset(df, seq_len=args.seq_len, athlete_ids=val_ids)
-    del df   # release the ~3 GB DataFrame — all needed data is now in the datasets
+    # Pre-split and sort before constructing datasets so the full 12M-row df
+    # is freed before the expensive encode step runs (saves ~3.5 GB at peak).
+    train_df = (df[df["athlete_id"].isin(set(train_ids))]
+                .sort_values(["athlete_id", "date"]).reset_index(drop=True))
+    val_df   = (df[df["athlete_id"].isin(set(val_ids))]
+                .sort_values(["athlete_id", "date"]).reset_index(drop=True))
+    del df
+
+    train_ds = CyclingDataset(train_df, seq_len=args.seq_len, already_sorted=True)
+    del train_df
+    val_ds   = CyclingDataset(val_df, seq_len=args.seq_len, already_sorted=True)
+    del val_df
     print(f"Train sequences: {len(train_ds):,}  Val sequences: {len(val_ds):,}")
 
     # Allow override via env var for high-core-count machines (default: 8 on GPU)
