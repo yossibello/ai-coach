@@ -18,6 +18,55 @@ STRAVA_API_BASE  = "https://www.strava.com/api/v3"
 SCOPE = "read,activity:read_all"
 
 
+def _extract_power_curve(watts: list, weight_kg: float) -> dict[str, float]:
+    """Compute best mean power over standard windows (W/kg) from a power stream."""
+    import numpy as np
+    arr = np.array(watts, dtype=np.float32)
+    n = len(arr)
+    result: dict[str, float] = {}
+    for window_s, key in [
+        (5,    "pc_5s_wkg"),
+        (60,   "pc_1min_wkg"),
+        (300,  "pc_5min_wkg"),
+        (1200, "pc_20min_wkg"),
+    ]:
+        if n < window_s:
+            result[key] = 0.0
+            continue
+        cs = np.concatenate([[0.0], np.cumsum(arr)])
+        sums = cs[window_s:] - cs[:-window_s]
+        best_w = float(np.max(sums)) / window_s
+        result[key] = round(best_w / weight_kg, 4)
+    return result
+
+
+async def _fetch_power_curve(
+    session: "aiohttp.ClientSession",
+    activity_id: int,
+    weight_kg: float,
+) -> dict[str, float]:
+    """Fetch Strava power stream for one activity and return W/kg power curve.
+
+    Returns empty dict on any error (404 = no power data, 429 = rate limited, etc.)
+    so the caller can safely proceed with pc values defaulting to 0.
+    """
+    url = f"{STRAVA_API_BASE}/activities/{activity_id}/streams"
+    try:
+        async with session.get(
+            url, params={"keys": "watts", "key_by_type": "true"}
+        ) as resp:
+            if resp.status != 200:
+                return {}
+            data = await resp.json()
+            # Response is {watts: {data: [...], ...}} with key_by_type=true
+            watts = data.get("watts", {}).get("data", [])
+            if not watts:
+                return {}
+            return _extract_power_curve(watts, weight_kg)
+    except Exception:
+        return {}
+
+
 def get_strava_auth_url() -> str:
     params = (
         f"client_id={settings.STRAVA_CLIENT_ID}"
@@ -138,24 +187,40 @@ async def sync_strava_history(
     all_activities: list[dict] = []
 
     timeout = aiohttp.ClientTimeout(total=60)
+    import asyncio
 
     is_full_sync = after_ts is None
 
-    # ── Paginate Strava API ───────────────────────────────────────────────
+    # Weight needed to convert peak watts → W/kg for the power curve
+    weight_kg: float | None = None
+    if user.profile and user.profile.weight_kg and user.profile.weight_kg > 0:
+        weight_kg = float(user.profile.weight_kg)
+
+    # ── Paginate Strava API + process activities within the same session ──
+    ride_types = {"Ride", "VirtualRide", "MountainBikeRide", "GravelRide", "EBikeRide"}
+
     async with aiohttp.ClientSession(headers=headers, timeout=timeout) as session:
+        # Pagination
         while True:
             params: dict = {"page": page, "per_page": per_page}
             if after_ts is not None:
                 params["after"] = after_ts
 
-            async with session.get(
-                f"{STRAVA_API_BASE}/athlete/activities",
-                params=params,
-            ) as resp:
-                if resp.status != 200:
+            # Retry up to 3 times on transient 5xx errors
+            batch = None
+            for attempt in range(3):
+                async with session.get(
+                    f"{STRAVA_API_BASE}/athlete/activities",
+                    params=params,
+                ) as resp:
+                    if resp.status == 200:
+                        batch = await resp.json()
+                        break
+                    if resp.status in (429, 500, 502, 503, 504) and attempt < 2:
+                        await asyncio.sleep(5 * (attempt + 1))
+                        continue
                     text = await resp.text()
                     raise RuntimeError(f"Strava API error {resp.status}: {text[:200]}")
-                batch = await resp.json()
 
             # Strava returns an error dict on auth failure — must be a list
             if not isinstance(batch, list):
@@ -174,33 +239,62 @@ async def sync_strava_history(
                 break
             page += 1
 
-    # ── Filter to cycling types ───────────────────────────────────────────
-    ride_types = {"Ride", "VirtualRide", "MountainBikeRide", "GravelRide", "EBikeRide"}
-    cycling = [a for a in all_activities if a.get("sport_type") in ride_types or a.get("type") in ride_types]
-    total_cycling = len(cycling)
-
-    if progress_callback:
-        progress_callback(0, total_cycling)
-
-    inserted = 0
-    for i, sa in enumerate(cycling):
-        ext_id = str(sa["id"])
-        result = await db.execute(
-            sa_select(Activity).where(
-                Activity.user_id == user.id,
-                Activity.external_id == ext_id,
-            )
-        )
-        existing = result.scalar_one_or_none()
-        if not existing:
-            activity = _strava_to_activity(sa, user.id)
-            compute_activity_metrics(activity, user)
-            _score_and_tag(activity, user)
-            db.add(activity)
-            inserted += 1
+        # ── Filter to cycling types ───────────────────────────────────────
+        cycling = [
+            a for a in all_activities
+            if a.get("sport_type") in ride_types or a.get("type") in ride_types
+        ]
+        total_cycling = len(cycling)
 
         if progress_callback:
-            progress_callback(i + 1, total_cycling)
+            progress_callback(0, total_cycling)
+
+        inserted = 0
+        for i, sa in enumerate(cycling):
+            ext_id = str(sa["id"])
+            result = await db.execute(
+                sa_select(Activity).where(
+                    Activity.user_id == user.id,
+                    Activity.external_id == ext_id,
+                )
+            )
+            existing = result.scalar_one_or_none()
+            if not existing:
+                # Fetch power stream only on incremental syncs (≤ 50 new rides).
+                # Full backfills skip this to avoid hitting Strava's 200 req/15min
+                # rate limit — a separate /backfill-power-curves endpoint handles it.
+                pc_curve: dict[str, float] = {}
+                if not is_full_sync and weight_kg and sa.get("device_watts"):
+                    pc_curve = await _fetch_power_curve(session, sa["id"], weight_kg)
+
+                activity = _strava_to_activity(sa, user.id, pc_curve)
+                compute_activity_metrics(activity, user)
+                _score_and_tag(activity, user)
+                db.add(activity)
+                inserted += 1
+
+                # Auto-detect FTP tests (e.g. Zwift "FTP Bike Test")
+                from app.services.metrics_service import detect_ftp_test
+                from app.models.tracking import PerformanceTest
+                test_type = detect_ftp_test(activity.name, activity.workout_type)
+                if test_type and activity.normalized_power:
+                    ftp_val: float
+                    if activity.pc_20min_wkg and weight_kg:
+                        ftp_val = activity.pc_20min_wkg * weight_kg * 0.95
+                    else:
+                        ftp_val = float(activity.normalized_power) * 0.95
+                    db.add(PerformanceTest(
+                        user_id=user.id,
+                        test_date=activity.date,
+                        test_type=test_type,
+                        value=round(ftp_val, 1),
+                        unit="W",
+                        source="auto_detected",
+                        notes=f"Auto-detected from Strava: {activity.name}",
+                    ))
+
+            if progress_callback:
+                progress_callback(i + 1, total_cycling)
 
     await db.flush()
 
@@ -219,20 +313,92 @@ async def sync_strava_history(
         pass  # recommendation refresh is best-effort; don't fail the sync
 
 
-def _strava_to_activity(sa: dict[str, Any], user_id: str) -> Activity:
+async def backfill_power_curves(
+    user: User,
+    db,
+    progress_callback: Callable[[int, int], None] | None = None,
+) -> int:
+    """Fetch Strava power streams for existing activities missing pc_* values.
+
+    Rate-limited to 1 request per 6 seconds (~10 req/min, well under Strava's
+    200/15min limit). Returns the number of activities updated.
+    """
+    import asyncio
+    from sqlalchemy import select as sa_select
+
+    weight_kg: float | None = None
+    if user.profile and user.profile.weight_kg and user.profile.weight_kg > 0:
+        weight_kg = float(user.profile.weight_kg)
+    if not weight_kg:
+        return 0
+
+    # Only activities with a real power meter (device_watts=True) that are missing curves.
+    # Strava can show avg_power for rides with estimated power but won't have stored streams
+    # for those — device_watts=True is the reliable signal that streams exist.
+    result = await db.execute(
+        sa_select(Activity)
+        .where(
+            Activity.user_id == user.id,
+            Activity.device_watts == True,  # noqa: E712
+            Activity.pc_5min_wkg.is_(None),
+            Activity.external_id.isnot(None),
+            Activity.source == "strava",
+        )
+        .order_by(Activity.date.desc())
+    )
+    activities = list(result.scalars().all())
+    total = len(activities)
+
+    if not activities:
+        return 0
+
+    token = await _refresh_token_if_needed(user, db)
+    headers = {"Authorization": f"Bearer {token}"}
+    timeout = aiohttp.ClientTimeout(total=30)
+
+    updated = 0
+    async with aiohttp.ClientSession(headers=headers, timeout=timeout) as session:
+        for i, act in enumerate(activities):
+            if progress_callback:
+                progress_callback(i, total)
+
+            pc = await _fetch_power_curve(session, int(act.external_id), weight_kg)
+            if pc and any(v for v in pc.values()):
+                act.pc_5s_wkg    = pc.get("pc_5s_wkg") or None
+                act.pc_1min_wkg  = pc.get("pc_1min_wkg") or None
+                act.pc_5min_wkg  = pc.get("pc_5min_wkg") or None
+                act.pc_20min_wkg = pc.get("pc_20min_wkg") or None
+                db.add(act)
+                updated += 1
+
+            # Flush every 20 to avoid huge pending transactions
+            if (i + 1) % 20 == 0:
+                await db.flush()
+
+            # 6s between requests → ~10 req/min → safe under Strava's 200/15min
+            await asyncio.sleep(6.0)
+
+    await db.flush()
+
+    if progress_callback:
+        progress_callback(total, total)
+
+    return updated
+
+
+def _strava_to_activity(
+    sa: dict[str, Any],
+    user_id: str,
+    pc_curve: dict[str, float] | None = None,
+) -> Activity:
     from dateutil import parser as dp  # type: ignore
 
-    date = dp.parse(sa["start_date"])
-
-    avg_power = sa.get("average_watts")
-    np_ = sa.get("weighted_average_watts")
-    ftp_guess = 200  # fallback; real FTP loaded from profile during metrics computation
-
-    tss = None
-    if avg_power and np_:
-        # TSS = (duration_s × NP × IF) / (FTP × 3600) × 100
-        # IF = NP / FTP  (rough, profile FTP used in metrics_service)
-        pass
+    # Use start_date_local (athlete's local time) so calendar dates match what
+    # the rider sees in Strava. Strava formats it as ISO 8601 with a spurious Z
+    # suffix that doesn't mean UTC — strip tzinfo so it's stored as local naive.
+    raw_date = sa.get("start_date_local") or sa["start_date"]
+    date = dp.parse(raw_date).replace(tzinfo=None)
+    pc = pc_curve or {}
 
     return Activity(
         user_id=user_id,
@@ -243,12 +409,17 @@ def _strava_to_activity(sa: dict[str, Any], user_id: str) -> Activity:
         duration_seconds=sa.get("moving_time", 0),
         distance_meters=sa.get("distance", 0),
         elevation_gain_meters=sa.get("total_elevation_gain"),
-        avg_power=avg_power,
+        avg_power=sa.get("average_watts"),
         max_power=sa.get("max_watts"),
-        normalized_power=np_,
+        normalized_power=sa.get("weighted_average_watts"),
         avg_hr=sa.get("average_heartrate"),
         max_hr=sa.get("max_heartrate"),
         avg_cadence=sa.get("average_cadence"),
         trainer=sa.get("trainer", False),
         kudos_count=sa.get("kudos_count"),
+        device_watts=sa.get("device_watts", False) or False,
+        pc_5s_wkg=pc.get("pc_5s_wkg") or None,
+        pc_1min_wkg=pc.get("pc_1min_wkg") or None,
+        pc_5min_wkg=pc.get("pc_5min_wkg") or None,
+        pc_20min_wkg=pc.get("pc_20min_wkg") or None,
     )

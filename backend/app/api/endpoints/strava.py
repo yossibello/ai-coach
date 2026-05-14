@@ -15,6 +15,7 @@ from app.services.strava_service import (
     get_strava_auth_url,
     exchange_strava_code,
     sync_strava_history,
+    backfill_power_curves,
 )
 
 log = logging.getLogger(__name__)
@@ -103,10 +104,72 @@ async def sync_history(
                 await sync_strava_history(bg_user, bg_db, update_progress)
                 await bg_db.commit()
             _sync_tasks[task_id]["status"] = "completed"
+
+            # After sync, run the power-curve backfill in the same background
+            # task so it isn't garbage-collected (create_task is unreliable here).
+            await _run_backfill(user_id)
+
         except Exception:
             err = traceback.format_exc()
             log.error("Strava sync failed for user %s:\n%s", user_id, err)
             print(f"[SYNC ERROR] user={user_id}\n{err}", flush=True)
+            _sync_tasks[task_id]["status"] = "failed"
+
+    background_tasks.add_task(run)
+    return SyncResponse(task_id=task_id)
+
+
+async def _run_backfill(user_id: str) -> None:
+    """Standalone backfill task — runs its own DB session."""
+    try:
+        async with AsyncSessionLocal() as db:
+            from sqlalchemy import select as sa_select
+            from sqlalchemy.orm import selectinload
+            result = await db.execute(
+                sa_select(User).where(User.id == user_id).options(
+                    selectinload(User.profile)
+                )
+            )
+            user = result.scalar_one()
+            updated = await backfill_power_curves(user, db)
+            await db.commit()
+            log.info("Power-curve backfill done for user %s: %d activities updated", user_id, updated)
+    except Exception:
+        log.error("Power-curve backfill failed for user %s:\n%s", user_id, traceback.format_exc())
+
+
+@router.post("/backfill-power-curves", response_model=SyncResponse)
+async def trigger_backfill(
+    background_tasks: BackgroundTasks,
+    current_user: User = Depends(get_current_user),
+):
+    """Manually trigger power-curve backfill for activities missing pc_* data."""
+    if not current_user.strava_connected:
+        raise HTTPException(400, "Strava not connected")
+
+    task_id = str(uuid.uuid4())
+    _sync_tasks[task_id] = {"status": "running", "progress": 0, "total": 0}
+    user_id = current_user.id
+
+    def update_progress(progress: int, total: int):
+        _sync_tasks[task_id].update({"progress": progress, "total": total})
+
+    async def run():
+        try:
+            async with AsyncSessionLocal() as bg_db:
+                from sqlalchemy import select as sa_select
+                from sqlalchemy.orm import selectinload
+                result = await bg_db.execute(
+                    sa_select(User).where(User.id == user_id).options(
+                        selectinload(User.profile)
+                    )
+                )
+                bg_user = result.scalar_one()
+                updated = await backfill_power_curves(bg_user, bg_db, update_progress)
+                await bg_db.commit()
+            _sync_tasks[task_id].update({"status": "completed", "updated": updated})
+        except Exception:
+            log.error("Backfill failed for user %s:\n%s", user_id, traceback.format_exc())
             _sync_tasks[task_id]["status"] = "failed"
 
     background_tasks.add_task(run)
@@ -183,17 +246,6 @@ async def estimate_ftp(
             message="Not enough long power rides to estimate FTP. Do a 45+ min hard effort.",
         )
 
-    if profile is None:
-        profile = AthleteProfile(user_id=current_user.id, ftp=estimated)
-        db.add(profile)
-    else:
-        profile.ftp = estimated
-        db.add(profile)
-
-    # Rebuild PMC with the new FTP so TSB/CTL reflect the updated value
-    await db.flush()
-    await compute_pmc_for_user(current_user.id, db)
-
     method = ftp_result.get("method", "power_weighted")
     confidence = ftp_result.get("confidence", 0.0)
     age_days = ftp_result.get("best_ride_age_days")
@@ -201,18 +253,67 @@ async def estimate_ftp(
     conf_low = ftp_result.get("confidence_low")
     conf_high = ftp_result.get("confidence_high")
     sample_count = ftp_result.get("sample_count", 0)
+    last_test_age = ftp_result.get("last_test_age_days")
+
+    ftp_meta = {
+        "method": method,
+        "confidence": confidence,
+        "sample_count": sample_count,
+        "trend": ftp_result.get("trend", "stable"),
+        "best_ride_age_days": age_days,
+        "last_test_age_days": last_test_age,
+        "confidence_low": conf_low,
+        "confidence_high": conf_high,
+        "tsb_correction": tsb_corr,
+    }
+
+    is_manual = profile is not None and profile.ftp_source == "manual"
+    is_test_result = method.startswith("verified_test") or method == "test_blend" or method == "test_anchored"
+    # Manual FTP is protected only against regular ride estimates, not against real test results
+    manual_wins = is_manual and prev is not None and estimated < prev and not is_test_result
+
+    if manual_wins:
+        # Don't overwrite a manually-set FTP with a lower estimate — just persist meta
+        profile.ftp_method = method
+        profile.ftp_meta = ftp_meta
+        db.add(profile)
+    elif profile is None:
+        profile = AthleteProfile(user_id=current_user.id, ftp=estimated, ftp_source="estimated", ftp_method=method, ftp_meta=ftp_meta)
+        db.add(profile)
+    else:
+        profile.ftp = estimated
+        profile.ftp_source = "estimated"
+        profile.ftp_method = method
+        profile.ftp_meta = ftp_meta
+        db.add(profile)
+
+    # Rebuild PMC with the new FTP so TSB/CTL reflect the updated value
+    await db.flush()
+    await compute_pmc_for_user(current_user.id, db)
     trend = ftp_result.get("trend", "stable")
 
     method_labels = {
-        "power_weighted": "from recent power data",
-        "blended": "blended with manual FTP (low training load)",
-        "manual_fallback": "from manual entry (power data too old)",
+        "power_weighted":   "power curve · multi-ride",
+        "blended":          "blended with profile FTP",
+        "manual_fallback":  "profile FTP (no recent power data)",
+        "test_blend":       f"test ({ftp_result.get('last_test_age_days', '?')}d ago) + rides",
+        "test_anchored":    f"rides · anchored by test ({ftp_result.get('last_test_age_days', '?')}d ago)",
     }
+    for key in list(method_labels.keys()):
+        if key.startswith("verified_test"):
+            method_labels[key] = f"verified test ({ftp_result.get('last_test_age_days', '?')}d ago)"
+    if method.startswith("verified_test"):
+        method_labels[method] = f"verified test ({ftp_result.get('last_test_age_days', '?')}d ago)"
     method_note = method_labels.get(method, method)
     band = f", range {conf_low}-{conf_high}W" if conf_low and conf_high else ""
     trend_note = "" if trend == "stable" else f", trend: {trend}"
 
-    if prev != estimated:
+    if manual_wins:
+        msg = (f"Manual FTP {prev}W kept — ride estimate: {estimated}W "
+               f"({method_note}{band}, {sample_count} rides, "
+               f"confidence {int(confidence*100)}%{trend_note}). "
+               f"Clear manual FTP in Profile to let estimation take over.")
+    elif prev != estimated:
         msg = (f"FTP updated from {prev}W → {estimated}W "
                f"({method_note}{band}, {sample_count} rides, "
                f"confidence {int(confidence*100)}%{trend_note})")
@@ -223,7 +324,7 @@ async def estimate_ftp(
     return FTPEstimateResponse(
         estimated_ftp=estimated,
         previous_ftp=prev,
-        updated=(prev != estimated),
+        updated=(not manual_wins and prev != estimated),
         confidence=confidence,
         confidence_low=conf_low,
         confidence_high=conf_high,

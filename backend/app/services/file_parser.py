@@ -10,6 +10,8 @@ from typing import Any
 import gpxpy
 import fitparse
 
+from app.services.hr_drift import compute_hr_drift_from_streams
+
 
 def parse_activity_file(path: str, ext: str) -> dict[str, Any]:
     if ext == ".gpx":
@@ -91,33 +93,61 @@ def _parse_gpx(path: str) -> dict[str, Any]:
     if temp_values:
         result["temperature_c"] = round(sum(temp_values) / len(temp_values), 1)
 
+    if power_values and hr_values and duration >= 2700:  # require 45+ min for drift
+        drift, _ = compute_hr_drift_from_streams(power_values, hr_values)
+        if drift is not None:
+            result["hr_drift"] = drift
+
     return result
 
 
-def _extract_gpx_extensions(point) -> dict:
-    """Extract HR, power, cadence, temp from GPX extension elements."""
+def _extract_gpx_extensions(element) -> dict:
+    """
+    Recursively extract HR, power, cadence, temp from GPX extension elements.
+    Works with both gpxpy trackpoints (have .extensions list) and raw XML elements
+    (iterable directly). Strips XML namespaces before matching tag names.
+    """
     data = {}
-    if not hasattr(point, "extensions") or not point.extensions:
-        return data
-    for ext in point.extensions:
-        tag = ext.tag.lower() if hasattr(ext, "tag") else ""
-        text = ext.text
-        if "hr" in tag and text:
-            try: data["hr"] = int(text)
-            except ValueError: pass
-        if "power" in tag and text:
-            try: data["power"] = float(text)
-            except ValueError: pass
-        if "cadence" in tag and text:
-            try: data["cadence"] = int(text)
-            except ValueError: pass
-        if "temp" in tag and text:
-            try: data["temp"] = float(text)
-            except ValueError: pass
-        # Recurse into children (Garmin nested extensions)
-        for child in ext:
-            child_data = _extract_gpx_extensions(child)
-            data.update(child_data)
+
+    # Get the list of child elements: gpxpy points expose .extensions,
+    # raw lxml/ET elements are directly iterable.
+    if hasattr(element, "extensions") and element.extensions is not None:
+        children = element.extensions
+    else:
+        children = list(element)
+
+    for child in children:
+        raw_tag = child.tag if hasattr(child, "tag") else ""
+        # Strip namespace: {http://www.garmin.com/...}hr  →  hr
+        tag = raw_tag.split("}")[-1].lower() if "}" in raw_tag else raw_tag.lower()
+
+        text = (child.text or "").strip()
+
+        if text:
+            if tag in ("hr", "heartrate", "heartratebpm", "value"):
+                # "value" appears inside <HeartRateBpm><Value>...</Value>
+                # only accept if parent context is HR — guard with range check
+                try:
+                    v = int(float(text))
+                    if 20 <= v <= 250:  # plausible HR range
+                        data.setdefault("hr", v)
+                except ValueError:
+                    pass
+            if tag == "power" or (tag.endswith("power") and "power" not in data):
+                try: data["power"] = float(text)
+                except ValueError: pass
+            if tag in ("cadence", "cad"):
+                try: data.setdefault("cadence", int(float(text)))
+                except ValueError: pass
+            if tag in ("atemp", "temp", "airtemp", "temperature"):
+                try: data.setdefault("temp", float(text))
+                except ValueError: pass
+
+        # Recurse — this now works because we use list(child) for XML elements
+        child_data = _extract_gpx_extensions(child)
+        for k, v in child_data.items():
+            data.setdefault(k, v)
+
     return data
 
 
@@ -168,6 +198,14 @@ def _parse_fit(path: str) -> dict[str, Any]:
     temps = [r.get("temperature") for r in records if r.get("temperature") is not None]
     if temps:
         result["temperature_c"] = round(sum(temps) / len(temps), 1)
+
+    # HR drift from per-record streams (requires both power + HR + 45+ min ride)
+    fit_powers = [float(r["power"]) for r in records if "power" in r]
+    fit_hrs    = [float(r["heart_rate"]) for r in records if "heart_rate" in r]
+    if fit_powers and fit_hrs and result.get("duration_seconds", 0) >= 2700:
+        drift, _ = compute_hr_drift_from_streams(fit_powers, fit_hrs)
+        if drift is not None:
+            result["hr_drift"] = drift
 
     return {k: v for k, v in result.items() if v is not None}
 

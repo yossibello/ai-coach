@@ -137,6 +137,28 @@ def _classify_workout(if_: float, duration_s: int) -> str:
     return "sprint"
 
 
+_FTP_TEST_PATTERNS = [
+    "ftp bike test", "ftp test", "zwift ftp", "ramp test",
+    "20 min ftp", "20 minute ftp", "20min ftp", "threshold test",
+    "ftp ramp", "short power build",
+]
+
+
+def detect_ftp_test(activity_name: str | None, workout_type: str | None = None) -> str | None:
+    """Return test type string if the activity looks like an FTP test, else None."""
+    name_lower = (activity_name or "").lower()
+    for pat in _FTP_TEST_PATTERNS:
+        if pat in name_lower:
+            if "ramp" in name_lower:
+                return "ftp_ramp"
+            if "8 min" in name_lower or "8min" in name_lower:
+                return "ftp_8min"
+            return "ftp_20min"
+    if workout_type and "threshold" in workout_type.lower():
+        return "ftp_20min"
+    return None
+
+
 async def estimate_ftp_from_activities(
     user_id: str,
     db: AsyncSession,
@@ -194,49 +216,144 @@ async def estimate_ftp_from_activities(
       sample_count         – number of rides that contributed
       trend                – "improving" | "stable" | "declining"
     """
-    RECENCY_TAU_DAYS = 60.0      # half-weight at ~42 days
+    from app.models.tracking import PerformanceTest
+    from app.models.user import AthleteProfile as _AP
+
+    RECENCY_TAU_DAYS = 60.0
     STALENESS_DAYS = 365
+    FRESH_TEST_DAYS  = 28   # < 4 weeks → full trust
+    BLEND_TEST_DAYS  = 84   # 4-12 weeks → blend test + rides
+    # > 12 weeks → test becomes a soft anchor, rides take over
     now = datetime.utcnow()
     cutoff = now - timedelta(days=365 * 3)
+
+    # ── Fetch most recent FTP test (any age — we'll apply smart aging below) ──
+    test_r = await db.execute(
+        sa_select(PerformanceTest)
+        .where(
+            PerformanceTest.user_id == user_id,
+            PerformanceTest.test_type.in_(["ftp_20min", "ftp_ramp", "ftp_8min"]),
+        )
+        .order_by(PerformanceTest.test_date.desc())
+        .limit(1)
+    )
+    latest_test = test_r.scalar_one_or_none()
+
+    # ── Fetch current CTL + CTL at test date (for fitness-retention aging) ────
+    fm_r = await db.execute(
+        sa_select(FitnessMetric)
+        .where(FitnessMetric.user_id == user_id)
+        .order_by(FitnessMetric.date.desc())
+        .limit(1)
+    )
+    today_fm = fm_r.scalar_one_or_none()
+    current_ctl = today_fm.ctl if today_fm else 0.0
+    current_tsb = today_fm.tsb if today_fm else 0.0
+
+    test_ctl: float | None = None
+    test_age_days: int = 9999
+    if latest_test:
+        test_d = latest_test.test_date.replace(tzinfo=None)
+        test_age_days = max((now - test_d).days, 0)
+        # CTL at test date — find the closest fitness metric row
+        fm_test_r = await db.execute(
+            sa_select(FitnessMetric)
+            .where(
+                FitnessMetric.user_id == user_id,
+                FitnessMetric.date <= latest_test.test_date,
+            )
+            .order_by(FitnessMetric.date.desc())
+            .limit(1)
+        )
+        fm_at_test = fm_test_r.scalar_one_or_none()
+        test_ctl = fm_at_test.ctl if fm_at_test else None
+
+    # ── Case 1: test < 4 weeks → full trust, return immediately ──────────────
+    if latest_test and test_age_days <= FRESH_TEST_DAYS:
+        ftp_v = int(round(latest_test.value))
+        return {
+            "estimated_ftp": ftp_v,
+            "confidence": 0.97,
+            "confidence_low": int(round(ftp_v * 0.97)),
+            "confidence_high": int(round(ftp_v * 1.03)),
+            "best_ride_age_days": test_age_days,
+            "tsb_correction": 1.0,
+            "method": f"verified_test:{latest_test.test_type}",
+            "sample_count": 1,
+            "trend": "stable",
+        }
+
+    # ── Compute age-adjusted test FTP (for blend or anchor) ──────────────────
+    aged_test_ftp: float | None = None
+    if latest_test and test_age_days <= STALENESS_DAYS:
+        raw = float(latest_test.value)
+        # CTL retention: if you maintained training, FTP decays minimally.
+        # If CTL dropped a lot → the test result is stale, apply fitness decay.
+        if test_ctl and test_ctl > 5 and current_ctl > 0:
+            ctl_ratio = min(current_ctl / test_ctl, 1.0)
+            # Aerobic fitness decays ~1%/week of detraining beyond week 2.
+            # We scale by CTL ratio so maintained training = no decay.
+            weeks_exposed = max(0, test_age_days - 14) / 7
+            max_decay = min(weeks_exposed * 0.01 * (1.0 - ctl_ratio), 0.15)
+            aged_test_ftp = raw * (1.0 - max_decay)
+        else:
+            # No CTL history — apply mild calendar decay: 0.5%/week after 4 weeks
+            excess_weeks = max(0, test_age_days - FRESH_TEST_DAYS) / 7
+            aged_test_ftp = raw * (1.0 - min(excess_weeks * 0.005, 0.10))
+
+    # ── Fetch user weight for power-curve watts conversion ────────────────────
+    prof_r = await db.execute(
+        sa_select(_AP).where(_AP.user_id == user_id).limit(1)
+    )
+    profile = prof_r.scalar_one_or_none()
+    weight_kg: float | None = getattr(profile, "weight_kg", None)
 
     result = await db.execute(
         sa_select(Activity)
         .where(
             Activity.user_id == user_id,
-            Activity.duration_seconds >= 480,  # at least 8 min
+            Activity.duration_seconds >= 480,
             Activity.date >= cutoff,
         )
         .order_by(Activity.date)
     )
     activities = result.scalars().all()
 
-    estimates: list[dict] = []  # each: {est, weight, age_days, dur_conf}
+    estimates: list[dict] = []
 
     for act in activities:
         dur = act.duration_seconds or 0
-        np_ = act.normalized_power
-        # NP-only: avg-power on real rides systematically under-estimates threshold
-        # capability (lots of coasting), so we don't use it as an FTP signal.
-        if not np_ or np_ < 80:
-            continue
-        power = float(np_)
 
-        # Pick a coefficient based purely on duration.  Longer effort = more
-        # representative of true threshold; shorter test = more uncertainty.
-        coef: float
-        dur_conf: float
-        if dur >= 3600:                       # ≥ 60 min long hard
-            coef, dur_conf = 1.00, 1.00
-        elif dur >= 2700:                     # 45-60 min
-            coef, dur_conf = 0.97, 0.95
-        elif dur >= 1200:                     # 20-min test
-            coef, dur_conf = 0.95, 0.70
-        elif dur >= 480:                      # 8-min test
-            coef, dur_conf = 0.90, 0.40
+        # ── Power-curve estimate (gold standard when available) ───────────────
+        # pc_20min_wkg = best 20-min average W/kg from the raw power stream.
+        # This is more accurate than whole-ride NP because it captures the
+        # actual peak sustainable effort, not a ride average.
+        is_ftp_test = bool(detect_ftp_test(act.name, act.workout_type))
+        if act.pc_20min_wkg and weight_kg:
+            best_20min_w = act.pc_20min_wkg * weight_kg
+            est = best_20min_w * 0.95   # standard 20-min → FTP conversion
+            # FTP tests get confidence 1.0; regular rides are slightly lower
+            dur_conf = 1.0 if is_ftp_test else 0.90
         else:
-            continue
+            # ── Whole-ride NP estimate (fallback for Strava API imports) ──────
+            np_ = act.normalized_power
+            if not np_ or np_ < 80:
+                continue
+            power = float(np_)
+            if dur >= 3600:
+                coef, dur_conf = 1.00, 1.00
+            elif dur >= 2700:
+                coef, dur_conf = 0.97, 0.95
+            elif dur >= 1200:
+                coef, dur_conf = 0.95, 0.70
+            elif dur >= 480:
+                coef, dur_conf = 0.90, 0.40
+            else:
+                continue
+            if is_ftp_test:
+                dur_conf = min(dur_conf * 1.5, 1.0)  # boost confidence for detected tests
+            est = power * coef
 
-        est = power * coef
         if est < 80 or est > 600:
             continue
 
@@ -354,36 +471,47 @@ async def estimate_ftp_from_activities(
             weighted_ftp = 0.7 * r_mean + 0.3 * weighted_ftp
 
     # ── Fatigue correction (TSB) ──────────────────────────────────────────────
-    fm_result = await db.execute(
-        sa_select(FitnessMetric)
-        .where(FitnessMetric.user_id == user_id)
-        .order_by(FitnessMetric.date.desc())
-        .limit(1)
-    )
-    today_fm = fm_result.scalar_one_or_none()
-    tsb = today_fm.tsb if today_fm else 0.0
-    ctl = today_fm.ctl if today_fm else 0.0
-
+    tsb = current_tsb
+    ctl = current_ctl
     fatigue_depth = max(-tsb, 0.0)
     tsb_correction = 1.0 + min(fatigue_depth, 30.0) * 0.003  # max +9%
     corrected_ftp = weighted_ftp * tsb_correction
 
     # ── Effective sample-size confidence ──────────────────────────────────────
-    # ESS = (Σw)² / Σw² ; bounded to 0-1 by ESS / 5  (5 hard rides → full conf)
     sum_w2 = sum(e["weight"] ** 2 for e in estimates)
     ess = (total_w ** 2) / sum_w2 if sum_w2 > 0 else 0
     ride_confidence = min(ess / 5.0, 1.0)
-    # Also need some training load for trust
     ctl_confidence = min(ctl / 20.0, 1.0)
     confidence = min(ride_confidence, ctl_confidence)
 
-    # ── Blend with manual FTP if confidence is low ────────────────────────────
-    if manual_ftp and manual_ftp >= 80 and confidence < 1.0:
+    # ── Blend: rides + aged test + manual FTP ────────────────────────────────
+    # Priority hierarchy (highest → lowest):
+    #   1. aged_test_ftp  (test 4-12 weeks old, fitness-retention adjusted)
+    #   2. corrected_ftp  (multi-ride weighted estimate)
+    #   3. manual_ftp     (profile value, used when confidence is low)
+    #
+    # Rule: if recent rides show HIGHER power than the aged test → rides win
+    # (you improved). If rides show lower → aged test wins (likely just fatigue).
+    method = "power_weighted"
+
+    if aged_test_ftp is not None and test_age_days <= BLEND_TEST_DAYS:
+        # 4-12 week range: blend test weight from 1.0→0.0 linearly
+        test_w = 1.0 - (test_age_days - FRESH_TEST_DAYS) / (BLEND_TEST_DAYS - FRESH_TEST_DAYS)
+        ride_w = 1.0 - test_w
+        blended_ftp = test_w * aged_test_ftp + ride_w * corrected_ftp
+        # If recent rides exceed the aged test, let them override (you improved)
+        blended_ftp = max(blended_ftp, corrected_ftp)
+        method = "test_blend"
+    elif aged_test_ftp is not None:
+        # > 12 weeks: test is a soft floor — don't go below it by more than 15%
+        floor = aged_test_ftp * 0.85
+        blended_ftp = max(corrected_ftp, floor)
+        method = "test_anchored" if blended_ftp > corrected_ftp else "power_weighted"
+    elif manual_ftp and manual_ftp >= 80 and confidence < 1.0:
         blended_ftp = corrected_ftp * confidence + manual_ftp * (1.0 - confidence)
-        method = "blended" if confidence < 0.95 else "power_weighted"
+        method = "blended"
     else:
         blended_ftp = corrected_ftp
-        method = "power_weighted"
 
     final_ftp = int(round(blended_ftp))
     if final_ftp < 80:
@@ -409,6 +537,8 @@ async def estimate_ftp_from_activities(
         "method": method,
         "sample_count": n,
         "trend": trend,
+        "last_test_age_days": test_age_days if test_age_days < 9999 else None,
+        "aged_test_ftp": int(round(aged_test_ftp)) if aged_test_ftp else None,
     }
 
 

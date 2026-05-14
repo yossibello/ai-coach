@@ -7,7 +7,7 @@ from datetime import datetime, timedelta, timezone
 
 from app.core.database import get_db
 from app.core.deps import get_current_user
-from app.models.user import User
+from app.models.user import User, AthleteProfile
 from app.models.recommendation import FitnessMetric
 from app.services.metrics_service import compute_pmc_for_user
 
@@ -21,6 +21,8 @@ class FitnessSnapshotOut(BaseModel):
     tsb: float
     tss: float
     ftp: float
+    ftp_method: Optional[str] = None
+    ftp_meta: Optional[dict] = None
 
 
 class FitnessProgressionOut(BaseModel):
@@ -60,6 +62,18 @@ async def get_fitness_progression(
     ]
 
     current_snapshot = history[-1] if history else None
+
+    # Attach the stored ftp_method from the athlete profile to the current snapshot
+    if current_snapshot is not None:
+        profile_result = await db.execute(
+            select(AthleteProfile).where(AthleteProfile.user_id == current_user.id)
+        )
+        profile = profile_result.scalar_one_or_none()
+        if profile and (profile.ftp_method or profile.ftp_meta):
+            current_snapshot = current_snapshot.model_copy(update={
+                "ftp_method": profile.ftp_method,
+                "ftp_meta": profile.ftp_meta,
+            })
 
     # FTP history (unique FTP values over time)
     ftp_history = []

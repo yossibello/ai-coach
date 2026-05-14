@@ -50,6 +50,45 @@ export default function DashboardPage() {
   const current = fitness?.current;
   const tsbStatus = current ? getTSBStatus(current.tsb) : null;
 
+  const ftpMeta = estimateFTP.data ?? (current?.ftp_meta ? {
+    method: current.ftp_meta.method,
+    confidence: current.ftp_meta.confidence,
+    sample_count: current.ftp_meta.sample_count,
+    trend: current.ftp_meta.trend,
+    best_ride_age_days: current.ftp_meta.best_ride_age_days,
+    last_test_age_days: current.ftp_meta.last_test_age_days,
+    confidence_low: current.ftp_meta.confidence_low,
+    confidence_high: current.ftp_meta.confidence_high,
+  } : null);
+
+  const METHOD_LABELS: Record<string, string> = {
+    power_weighted:  "Power curve",
+    blended:         "Blended w/ profile",
+    manual_fallback: "Profile FTP (no rides)",
+    test_blend:      "Test blend",
+    test_anchored:   "Test anchored",
+  };
+
+  const ftpSub = (() => {
+    if (!ftpMeta) return "Functional Threshold Power";
+    const m = ftpMeta.method ?? "";
+    return m.startsWith("verified_test") ? "Verified test" : (METHOD_LABELS[m] ?? m);
+  })();
+
+  const ftpDetail = (() => {
+    if (!ftpMeta) return undefined;
+    const parts: string[] = [];
+    if (ftpMeta.sample_count > 0) parts.push(`${ftpMeta.sample_count} rides`);
+    if (ftpMeta.last_test_age_days != null) parts.push(`test ${ftpMeta.last_test_age_days}d ago`);
+    else if (ftpMeta.best_ride_age_days != null) parts.push(`best ride ${ftpMeta.best_ride_age_days}d ago`);
+    if (ftpMeta.confidence_low && ftpMeta.confidence_high)
+      parts.push(`range ${ftpMeta.confidence_low}–${ftpMeta.confidence_high}W`);
+    if (ftpMeta.trend && ftpMeta.trend !== "stable") parts.push(ftpMeta.trend);
+    return parts.length > 0 ? parts.join(" · ") : undefined;
+  })();
+
+  const ftpConfidence = ftpMeta?.confidence ?? undefined;
+
   return (
     <div className="p-6 space-y-6 animate-fade-in">
       {/* Header */}
@@ -86,7 +125,9 @@ export default function DashboardPage() {
           icon={Zap}
           label="FTP"
           value={current ? formatPower(current.ftp) : "—"}
-          sub="Functional Threshold Power"
+          sub={ftpSub}
+          detail={ftpDetail}
+          confidence={ftpConfidence}
           color="text-brand-400"
         />
         <MetricCard

@@ -34,6 +34,12 @@ class Activity(Base):
     tss: Mapped[float | None] = mapped_column(Float, nullable=True)
     variability_index: Mapped[float | None] = mapped_column(Float, nullable=True)
 
+    # Power curve — best mean W/kg at each duration (0 = no power meter / not recorded)
+    pc_5s_wkg: Mapped[float | None] = mapped_column(Float, nullable=True)
+    pc_1min_wkg: Mapped[float | None] = mapped_column(Float, nullable=True)
+    pc_5min_wkg: Mapped[float | None] = mapped_column(Float, nullable=True)
+    pc_20min_wkg: Mapped[float | None] = mapped_column(Float, nullable=True)
+
     # Heart rate
     avg_hr: Mapped[int | None] = mapped_column(Integer, nullable=True)
     max_hr: Mapped[int | None] = mapped_column(Integer, nullable=True)
@@ -58,6 +64,7 @@ class Activity(Base):
     # Strava-specific extras
     kudos_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
     trainer: Mapped[bool | None] = mapped_column(nullable=True)
+    device_watts: Mapped[bool | None] = mapped_column(nullable=True)  # True = real power meter (has streams)
 
     # ── Data quality (Phase 1: rule-based; Phase 2+: feeds community retraining) ──
     # quality_score: 'high' | 'medium' | 'low' | 'rejected'

@@ -10,8 +10,11 @@ import type {
   UploadResult,
 } from "@/types";
 
+// All requests use relative paths so they go through the Next.js proxy
+// (/api/v1/* → backend). Never call the backend directly from the browser —
+// that breaks when accessing from a phone or any non-localhost device.
 const api = axios.create({
-  baseURL: process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000",
+  baseURL: "",
   headers: { "Content-Type": "application/json" },
 });
 
@@ -82,7 +85,20 @@ export const stravaAPI = {
   disconnect: () => api.delete("/api/v1/strava/disconnect"),
 
   estimateFTP: () =>
-    api.post<{ estimated_ftp: number | null; previous_ftp: number | null; updated: boolean; message: string }>("/api/v1/strava/estimate-ftp").then((r) => r.data),
+    api.post<{
+      estimated_ftp: number | null;
+      previous_ftp: number | null;
+      updated: boolean;
+      message: string;
+      confidence: number;
+      confidence_low: number | null;
+      confidence_high: number | null;
+      method: string;
+      best_ride_age_days: number | null;
+      tsb_correction: number;
+      sample_count: number;
+      trend: string;
+    }>("/api/v1/strava/estimate-ftp").then((r) => r.data),
 
   rebuildPMC: () =>
     api.post("/api/v1/strava/rebuild-pmc").then((r) => r.data),
@@ -185,10 +201,31 @@ export const garminAPI = {
     ).then((r) => r.data),
 };
 
+// ─── Oura Ring ───────────────────────────────────────────────────────────────
+
+export const ouraAPI = {
+  status: () => api.get<{ connected: boolean }>("/api/v1/oura/status").then(r => r.data),
+  connect: (token: string) => api.post("/api/v1/oura/connect", { token }).then(r => r.data),
+  disconnect: () => api.delete("/api/v1/oura/disconnect").then(r => r.data),
+  sync: (days = 60) => api.post<{ task_id: string }>(`/api/v1/oura/sync?days=${days}`).then(r => r.data),
+  syncStatus: (taskId: string) => api.get<{ status: string; stats: Record<string, number> | null; error: string | null }>(`/api/v1/oura/sync-status/${taskId}`).then(r => r.data),
+};
+
+// ─── Fitbit ──────────────────────────────────────────────────────────────────
+
+export const fitbitAPI = {
+  status: () => api.get<{ connected: boolean; user_id: string | null }>("/api/v1/fitbit/status").then(r => r.data),
+  authUrl: () => api.get<{ url: string }>("/api/v1/fitbit/auth-url").then(r => r.data),
+  disconnect: () => api.delete("/api/v1/fitbit/disconnect").then(r => r.data),
+  sync: (days = 60) => api.post<{ task_id: string }>(`/api/v1/fitbit/sync?days=${days}`).then(r => r.data),
+  syncStatus: (taskId: string) => api.get<{ status: string; stats: Record<string, number> | null; error: string | null }>(`/api/v1/fitbit/sync-status/${taskId}`).then(r => r.data),
+};
+
 // ─── Health (HRV / RHR / Sleep / Body Battery / Readiness) ──────────────────
 
 export interface HealthDay {
   date: string;
+  source: string;
   sleep_total_seconds: number | null;
   sleep_score: number | null;
   hrv_overnight_avg_ms: number | null;
@@ -213,14 +250,35 @@ export interface Readiness {
   advice: string;
 }
 
+export interface DriftStatus {
+  state: "stable" | "decoupled" | "stressed" | "unknown";
+  drift_pct: number | null;
+  trend: "improving" | "worsening" | "stable" | "unknown";
+  overtraining_risk: boolean;
+  action: string;
+  note: string;
+}
+
+export interface ManualHealthLog {
+  hrv_ms?: number | null;
+  resting_hr?: number | null;
+  sleep_hours?: number | null;
+  sleep_score?: number | null;
+  energy_level?: number | null;
+  stress_level?: number | null;
+}
+
 export const healthAPI = {
   recent: (days = 30) =>
-    api.get<{ days: HealthDay[]; readiness: Readiness }>(
+    api.get<{ days: HealthDay[]; readiness: Readiness; drift: DriftStatus | null; has_manual_today: boolean }>(
       `/api/v1/health/recent?days=${days}`
     ).then((r) => r.data),
 
   readiness: () =>
     api.get<Readiness>("/api/v1/health/readiness").then((r) => r.data),
+
+  logManual: (body: ManualHealthLog) =>
+    api.post<HealthDay>("/api/v1/health/log", body).then((r) => r.data),
 };
 
 // ─── Nutrition / Supplements ─────────────────────────────────────────────────

@@ -99,7 +99,12 @@ def per_day_health_features(
     return out
 
 
-def compute_readiness(history: Sequence[HealthMetric]) -> ReadinessSnapshot:
+def compute_readiness(
+    history: Sequence[HealthMetric],
+    *,
+    drift_state: str | None = None,
+    drift_pct: float | None = None,
+) -> ReadinessSnapshot:
     """
     Compute today's readiness from a chronologically sorted list of HealthMetric.
     The LAST entry is treated as 'today'. Missing data is handled gracefully —
@@ -167,16 +172,38 @@ def compute_readiness(history: Sequence[HealthMetric]) -> ReadinessSnapshot:
     if body_battery is not None and body_battery < 40:
         drivers.append(f"Body Battery only {body_battery}% — limited reserves.")
 
+    # ── HR Drift (aerobic decoupling trend) ────────────────────────────────
+    # Drift integrates cumulative physiological stress across recent rides,
+    # complementing the acute HRV/RHR signals (which reflect only last night).
+    drift_score: float | None = None
+    if drift_state is not None and drift_pct is not None:
+        if drift_state == "stable":
+            drift_score = 85.0
+        elif drift_state == "decoupled":
+            drift_score = 50.0
+            drivers.append(
+                f"HR drift {drift_pct:.1f}% — aerobic consolidation phase. "
+                "Cap intensity at sweetspot until drift normalises."
+            )
+        else:  # stressed
+            drift_score = 20.0
+            drivers.append(
+                f"HR drift {drift_pct:.1f}% — high metabolic stress detected. "
+                "Reduce session duration and verify other recovery signals."
+            )
+
     # ── Weighted blend ─────────────────────────────────────────────────────
     parts: list[tuple[float, float]] = []  # (weight, score)
     if hrv_score is not None:
-        parts.append((0.40, hrv_score))
+        parts.append((0.35, hrv_score))
     if rhr_score is not None:
-        parts.append((0.25, rhr_score))
+        parts.append((0.20, rhr_score))
     if sleep_score is not None:
         parts.append((0.20, float(sleep_score)))
     if body_battery is not None:
         parts.append((0.15, float(body_battery)))
+    if drift_score is not None:
+        parts.append((0.10, drift_score))
 
     if not parts:
         score = 50.0

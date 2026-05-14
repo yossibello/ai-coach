@@ -1,7 +1,7 @@
 import uuid
 from datetime import datetime, timezone
 
-from sqlalchemy import String, Boolean, DateTime, ForeignKey, func
+from sqlalchemy import String, Boolean, DateTime, ForeignKey, func, JSON
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from sqlalchemy.dialects.postgresql import UUID
 
@@ -32,6 +32,17 @@ class User(Base):
     # Encrypted Garmin Connect password (Fernet, dev-only path).  NEVER store plaintext.
     garmin_password_enc: Mapped[str | None] = mapped_column(String, nullable=True)
     garmin_user_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    # Encrypted garth token store (JSON blob). Lets us skip re-login on every sync.
+    garmin_token_store: Mapped[str | None] = mapped_column(String, nullable=True)
+
+    # Oura Ring (personal access token)
+    oura_access_token_enc: Mapped[str | None] = mapped_column(String, nullable=True)
+
+    # Fitbit OAuth
+    fitbit_access_token_enc: Mapped[str | None] = mapped_column(String, nullable=True)
+    fitbit_refresh_token_enc: Mapped[str | None] = mapped_column(String, nullable=True)
+    fitbit_user_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    fitbit_token_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     # ── ML / training participation ───────────────────────────────────────────
     # User consent: may we use their (anonymized) rides to retrain the community model?
@@ -85,6 +96,9 @@ class AthleteProfile(Base):
     sex: Mapped[str | None] = mapped_column(String(10), nullable=True)
 
     ftp: Mapped[int | None] = mapped_column(nullable=True)        # watts
+    ftp_source: Mapped[str | None] = mapped_column(String(20), nullable=True)  # "manual" | "estimated"
+    ftp_method: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    ftp_meta: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     max_hr: Mapped[int | None] = mapped_column(nullable=True)     # bpm
     resting_hr: Mapped[int | None] = mapped_column(nullable=True)
     vo2max_estimate: Mapped[float | None] = mapped_column(nullable=True)

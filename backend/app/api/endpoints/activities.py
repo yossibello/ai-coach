@@ -5,14 +5,16 @@ from sqlalchemy.orm import selectinload
 from pydantic import BaseModel
 from typing import Optional
 import os, uuid, pathlib
+from datetime import timedelta
 
 from app.core.database import get_db
 from app.core.deps import get_current_user
 from app.core.config import settings
 from app.models.user import User
 from app.models.activity import Activity
+from app.models.tracking import PerformanceTest
 from app.services.file_parser import parse_activity_file
-from app.services.metrics_service import compute_activity_metrics, _score_and_tag
+from app.services.metrics_service import compute_activity_metrics, _score_and_tag, detect_ftp_test
 
 router = APIRouter()
 
@@ -115,24 +117,123 @@ async def upload_activity(
         file_path.unlink(missing_ok=True)
         raise HTTPException(422, f"Could not parse file: {exc}")
 
-    # Check duplicate by external_id or date+duration
+    parsed.setdefault("source", ext.lstrip("."))
+
+    # ── Try to find an existing activity this file matches ──────────────────
+    # 1. Exact match by external_id (rare for GPX, but possible for FIT exports)
+    existing: Activity | None = None
     if parsed.get("external_id"):
-        dup = await db.execute(
+        r = await db.execute(
             select(Activity).where(
                 Activity.user_id == current_user.id,
                 Activity.external_id == parsed["external_id"],
             )
         )
-        if dup.scalar_one_or_none():
-            return UploadResult(activity_id=None, status="duplicate", message="Activity already exists")
+        existing = r.scalar_one_or_none()
 
-    activity = Activity(user_id=current_user.id, source=ext.lstrip("."), **parsed)
+    # 2. Fuzzy match — two passes to handle timezone-naive GPX files.
+    #    Pass A: tight ±5 min window (exact match for well-formed files).
+    #    Pass B: same UTC calendar day + duration within 10% (catches GPX files
+    #            that store local time as if it were UTC, e.g. MyWhoosh exports).
+    if existing is None and parsed.get("date"):
+        dur = parsed.get("duration_seconds", 0)
+
+        for window_hours in (0, 12):   # pass A: 5 min, pass B: whole day
+            if window_hours == 0:
+                delta = timedelta(minutes=5)
+                start = parsed["date"] - delta
+                end   = parsed["date"] + delta
+            else:
+                # Search the entire UTC calendar day of the parsed date
+                day_start = parsed["date"].replace(hour=0, minute=0, second=0, microsecond=0)
+                start = day_start - timedelta(hours=12)   # cover ±12 h for any TZ offset
+                end   = day_start + timedelta(hours=36)
+
+            r = await db.execute(
+                select(Activity).where(
+                    Activity.user_id == current_user.id,
+                    Activity.date >= start,
+                    Activity.date <= end,
+                    Activity.review_status != "deleted",
+                )
+            )
+            candidates = r.scalars().all()
+            tol = 0.15 if window_hours == 0 else 0.10   # tighter on day-level match
+            best = None
+            best_dur_diff = float("inf")
+            for c in candidates:
+                if dur > 0 and c.duration_seconds > 0:
+                    ratio = dur / c.duration_seconds
+                    if (1 - tol) <= ratio <= (1 + tol):
+                        diff = abs(dur - c.duration_seconds)
+                        if diff < best_dur_diff:
+                            best = c
+                            best_dur_diff = diff
+            if best:
+                existing = best
+                break
+
+    # ── Merge into existing activity ─────────────────────────────────────────
+    if existing is not None:
+        # Fields that the file parser can provide but Strava/Garmin API often cannot.
+        # Always overwrite hr_drift (the main reason to upload a GPX after the fact).
+        # For other fields, only fill in if the existing value is NULL.
+        always_overwrite = {"hr_drift", "avg_cadence", "temperature_c"}
+        fill_if_null = {
+            "avg_power", "max_power", "normalized_power",
+            "avg_hr", "max_hr", "elevation_gain_meters",
+        }
+        enriched_fields: list[str] = []
+        for field in always_overwrite | fill_if_null:
+            new_val = parsed.get(field)
+            if new_val is None:
+                continue
+            if field in always_overwrite or getattr(existing, field) is None:
+                setattr(existing, field, new_val)
+                enriched_fields.append(field)
+
+        # Re-derive computed metrics from the new raw values
+        compute_activity_metrics(existing, current_user)
+
+        await db.flush()
+        fields_str = ", ".join(enriched_fields) if enriched_fields else "nothing new"
+        return UploadResult(
+            activity_id=existing.id,
+            status="enriched",
+            message=f"Matched existing activity — enriched: {fields_str}",
+        )
+
+    # ── New activity ──────────────────────────────────────────────────────────
+    activity = Activity(user_id=current_user.id, **parsed)
     compute_activity_metrics(activity, current_user)
     _score_and_tag(activity, current_user)
     db.add(activity)
     await db.flush()
 
-    return UploadResult(activity_id=activity.id, status="success", message="Uploaded successfully")
+    # ── Auto-detect FTP test and log to PerformanceTest ───────────────────────
+    msg = "Uploaded successfully"
+    test_type = detect_ftp_test(activity.name, activity.workout_type)
+    if test_type and activity.normalized_power:
+        profile = getattr(current_user, "profile", None)
+        weight_kg = getattr(profile, "weight_kg", None)
+        if activity.pc_20min_wkg and weight_kg:
+            ftp_value = round(activity.pc_20min_wkg * weight_kg * 0.95, 1)
+        else:
+            ftp_value = round(float(activity.normalized_power) * 0.95, 1)
+        pt = PerformanceTest(
+            user_id=current_user.id,
+            test_date=activity.date,
+            test_type=test_type,
+            value=ftp_value,
+            unit="W",
+            source="auto_detected",
+            notes=f"Auto-detected from: {activity.name}",
+        )
+        db.add(pt)
+        await db.flush()
+        msg = f"FTP test detected — estimated FTP: {int(round(ftp_value))} W"
+
+    return UploadResult(activity_id=activity.id, status="success", message=msg)
 
 
 @router.get("/{activity_id}", response_model=ActivityOut)

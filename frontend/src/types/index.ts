@@ -128,6 +128,17 @@ export interface FitnessSnapshot {
   tsb: number;   // Training Stress Balance (form)  = CTL - ATL
   tss: number;   // Daily TSS
   ftp: number;
+  ftp_method?: string | null;
+  ftp_meta?: {
+    method: string;
+    confidence: number;
+    sample_count: number;
+    trend: string;
+    best_ride_age_days: number | null;
+    last_test_age_days: number | null;
+    confidence_low: number | null;
+    confidence_high: number | null;
+  } | null;
 }
 
 export interface FitnessProgression {

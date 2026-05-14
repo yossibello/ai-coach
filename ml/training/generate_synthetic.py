@@ -635,6 +635,7 @@ def _simulate_ride(
         "primary_goal":          athlete.goal,
         "event_type":            athlete.event_type,
         "days_to_event":         max(0.0, (athlete.event_week - (date - athlete.start_date).days / 7.0)) * 7.0,
+        "training_days":         float(athlete.training_days),
         # ── Health & recovery (raw values + derived z-score / delta) ────
         "hrv_overnight_ms":      hrv_today if hrv_today is not None else athlete.hrv_baseline,
         "hrv_z":                 (

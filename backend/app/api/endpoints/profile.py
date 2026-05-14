@@ -86,7 +86,10 @@ async def update_profile(
         profile = AthleteProfile(user_id=current_user.id)
         db.add(profile)
 
-    for field, value in body.model_dump(exclude_none=True).items():
+    fields = body.model_dump(exclude_none=True)
+    if "ftp" in fields:
+        profile.ftp_source = "manual"
+    for field, value in fields.items():
         if field == "goal_event_date" and value:
             setattr(profile, field, datetime.fromisoformat(value))
         else:
