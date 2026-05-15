@@ -164,6 +164,16 @@ export const coachAPI = {
     api.get<{ analysis: string; insights: string[] }>(
       `/api/v1/coach/analyze/${activityId}`
     ).then((r) => r.data),
+
+  postFeedback: (recId: string, action: "accepted" | "modified" | "rejected" | "skipped", opts?: {
+    post_ride_rpe?: number;
+    modified_workout_type?: string;
+    comment?: string;
+  }) =>
+    api.post<{ id: string; ok: boolean }>(
+      `/api/v1/coach/recommendation/${recId}/feedback`,
+      { action, ...opts }
+    ).then((r) => r.data),
 };
 
 // ─── Profile ─────────────────────────────────────────────────────────────────

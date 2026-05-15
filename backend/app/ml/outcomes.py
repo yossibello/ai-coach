@@ -26,9 +26,12 @@ from typing import Iterable
 from sqlalchemy import select, and_
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from sqlalchemy.orm import selectinload
+
 from app.models.activity import Activity
+from app.models.health import HealthMetric
 from app.models.recommendation import Recommendation
-from app.models.outcome import PredictionOutcome
+from app.models.outcome import PredictionOutcome, RecommendationFeedback
 
 
 # How long after a recommendation is generated before we score it.
@@ -36,6 +39,8 @@ DEFAULT_HORIZON_DAYS = 28
 # Window AROUND the recommendation date in which we look for the
 # "actual" next ride. ±2 days handles small timezone / scheduling drift.
 NEXT_RIDE_WINDOW_DAYS = 3
+# HRV recovery window: 7 days post-recommendation.
+HRV_WINDOW_DAYS = 7
 
 
 def _ensure_aware(dt: datetime) -> datetime:
@@ -67,10 +72,38 @@ def _ftp_at(activities: list[Activity], at: datetime, profile_ftp: float | None)
     return profile_ftp
 
 
+def _compute_outcome_weight(
+    accepted: bool | None,
+    ftp_delta_actual: float | None,
+    avg_hrv: float | None,
+) -> float:
+    """
+    Compute a 0–1 training weight for LoRA fine-tuning.
+
+    Weights signal how much to trust this data point:
+      0.2  base (athlete did something — any signal is better than none)
+      +0.3 if the athlete followed our recommendation
+      +0.3 if their fitness improved (ftp_delta > 0 or proxy NP improved)
+      +0.2 if HRV z-score was positive (body recovered well)
+
+    Near-zero weight = athlete ignored us AND got weaker = don't learn from this.
+    """
+    w = 0.2
+    if accepted:
+        w += 0.3
+    if ftp_delta_actual is not None and ftp_delta_actual > 0:
+        w += 0.3
+    if avg_hrv is not None and avg_hrv > 0:
+        w += 0.2
+    return round(w, 3)
+
+
 async def _backfill_one(
     rec: Recommendation,
     activities_after: list[Activity],
     horizon_end: datetime,
+    health_after: list[HealthMetric],
+    accepted: bool | None,
     db: AsyncSession,
 ) -> PredictionOutcome | None:
     """Compute and insert a single PredictionOutcome row.
@@ -126,6 +159,29 @@ async def _backfill_one(
                 old_proxy = sum(week1_nps[: min(3, len(week1_nps))]) / min(3, len(week1_nps))
                 actual_ftp_delta_w = recent_proxy - old_proxy
 
+    # Average HRV z-score in the 7 days after recommendation (positive = recovering).
+    hrv_window_end = rec_at + timedelta(days=HRV_WINDOW_DAYS)
+    hrv_scores = [
+        h.hrv_rmssd  # raw RMSSD; HealthMetric stores this
+        for h in health_after
+        if _ensure_aware(h.date) <= hrv_window_end
+        and h.hrv_rmssd is not None
+    ]
+    avg_hrv_recovery: float | None = None
+    if hrv_scores:
+        avg_hrv_recovery = round(sum(hrv_scores) / len(hrv_scores), 3)
+
+    workout_type_match = (
+        actual_workout_type is not None
+        and pred["workout_type"] is not None
+        and actual_workout_type == pred["workout_type"]
+    )
+    outcome_weight = _compute_outcome_weight(
+        accepted=accepted if accepted is not None else workout_type_match,
+        ftp_delta_actual=actual_ftp_delta_w,
+        avg_hrv=avg_hrv_recovery,
+    )
+
     outcome = PredictionOutcome(
         recommendation_id=rec.id,
         user_id=rec.user_id,
@@ -138,11 +194,7 @@ async def _backfill_one(
         actual_intensity=actual_intensity,
         actual_ftp_delta_w=actual_ftp_delta_w,
         horizon_days=DEFAULT_HORIZON_DAYS,
-        workout_type_match=(
-            actual_workout_type is not None
-            and pred["workout_type"] is not None
-            and actual_workout_type == pred["workout_type"]
-        ),
+        workout_type_match=workout_type_match,
         duration_abs_err_min=(
             abs(actual_duration_min - pred["duration_min"])
             if actual_duration_min is not None and pred["duration_min"] is not None
@@ -153,6 +205,8 @@ async def _backfill_one(
             if actual_ftp_delta_w is not None and pred["ftp_delta_w"] is not None
             else None
         ),
+        avg_hrv_recovery=avg_hrv_recovery,
+        outcome_weight=outcome_weight,
     )
     db.add(outcome)
     return outcome
@@ -198,7 +252,7 @@ async def backfill_user_outcomes(
     if not pending:
         return 0
 
-    # Pull this user's confirmed activities once.
+    # Pull this user's confirmed activities + health metrics once.
     acts = (await db.execute(
         select(Activity)
         .where(
@@ -208,12 +262,30 @@ async def backfill_user_outcomes(
         .order_by(Activity.date)
     )).scalars().all()
 
+    health = (await db.execute(
+        select(HealthMetric)
+        .where(HealthMetric.user_id == user_id)
+        .order_by(HealthMetric.date)
+    )).scalars().all()
+
+    # Build a map of recommendation_id → accepted (from RecommendationFeedback).
+    feedback_rows = (await db.execute(
+        select(RecommendationFeedback.recommendation_id, RecommendationFeedback.action)
+        .where(RecommendationFeedback.user_id == user_id)
+    )).all()
+    accepted_map: dict[str, bool] = {
+        row.recommendation_id: row.action == "accepted"
+        for row in feedback_rows
+    }
+
     written = 0
     for rec in pending:
         rec_at = _ensure_aware(rec.generated_at)
         horizon_end = rec_at + timedelta(days=horizon_days)
-        after = [a for a in acts if _ensure_aware(a.date) > rec_at]
-        outcome = await _backfill_one(rec, after, horizon_end, db)
+        after_acts = [a for a in acts if _ensure_aware(a.date) > rec_at]
+        after_health = [h for h in health if _ensure_aware(h.date) > rec_at]
+        accepted = accepted_map.get(rec.id)
+        outcome = await _backfill_one(rec, after_acts, horizon_end, after_health, accepted, db)
         if outcome is not None:
             written += 1
 

@@ -105,9 +105,10 @@ async def sync_history(
                 await bg_db.commit()
             _sync_tasks[task_id]["status"] = "completed"
 
-            # After sync, run the power-curve backfill in the same background
-            # task so it isn't garbage-collected (create_task is unreliable here).
+            # After sync, run the power-curve backfill then the outcome backfill
+            # in the same background task (create_task is unreliable here).
             await _run_backfill(user_id)
+            await _run_outcome_backfill(user_id)
 
         except Exception:
             err = traceback.format_exc()
@@ -136,6 +137,25 @@ async def _run_backfill(user_id: str) -> None:
             log.info("Power-curve backfill done for user %s: %d activities updated", user_id, updated)
     except Exception:
         log.error("Power-curve backfill failed for user %s:\n%s", user_id, traceback.format_exc())
+
+
+async def _run_outcome_backfill(user_id: str) -> None:
+    """Score mature recommendations (≥28d old) for this user after each sync.
+
+    Runs with a short horizon (3d) first to capture the day-1 actual workout,
+    then the full 28d horizon for FTP/HRV outcome weighting. Using the
+    28d default here covers both — the job is idempotent so it's safe to run
+    every sync even though most recs won't be mature yet.
+    """
+    try:
+        from app.ml.outcomes import backfill_user_outcomes
+        async with AsyncSessionLocal() as db:
+            written = await backfill_user_outcomes(user_id, db)
+            await db.commit()
+            if written:
+                log.info("Outcome backfill: %d new rows for user %s", written, user_id)
+    except Exception:
+        log.error("Outcome backfill failed for user %s:\n%s", user_id, traceback.format_exc())
 
 
 @router.post("/backfill-power-curves", response_model=SyncResponse)

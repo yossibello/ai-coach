@@ -1,9 +1,9 @@
 "use client";
 
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { useEffect, useState, useMemo } from "react";
+import { useEffect, useState, useMemo, useCallback } from "react";
 import { coachAPI } from "@/lib/api";
-import { Brain, RefreshCw, AlertTriangle, CheckCircle, Info, Zap, Calendar, Target } from "lucide-react";
+import { Brain, RefreshCw, AlertTriangle, CheckCircle, Info, Zap, Calendar, Target, ThumbsUp, ThumbsDown, X } from "lucide-react";
 import { cn, formatDuration } from "@/lib/utils";
 import type { CoachRecommendation, WorkoutPlan, CoachInsight, TrainingRisk, HorizonKey, HorizonPayload, Macrocycle, MacrocycleWeek } from "@/types";
 import toast from "react-hot-toast";
@@ -102,7 +102,7 @@ export default function CoachPage() {
   }
 
   return (
-    <div className="p-6 space-y-6 animate-fade-in">
+    <div className="p-4 space-y-4 animate-fade-in">
       {/* Header */}
       <div className="flex items-center justify-between">
         <div>
@@ -155,25 +155,35 @@ export default function CoachPage() {
 
       {/* Weekly plan */}
       <div>
-        <h2 className="text-lg font-semibold text-white mb-4 flex items-center gap-2">
+        <h2 className="text-lg font-semibold text-white mb-3 flex items-center gap-2">
           <Calendar className="w-5 h-5 text-brand-400" />
-          7-Day Training Plan
+          {(() => {
+            const plan = horizonPayload?.weekly_plan ?? data.weekly_plan;
+            const n = plan?.length ?? 0;
+            return `${n}-Day Training Plan`;
+          })()}
           {horizonPayload && (
             <span className="text-xs text-slate-500 font-normal">
               · {horizonPayload.horizon_label}
             </span>
           )}
         </h2>
-        <div className="space-y-3">
-          {(horizonPayload?.weekly_plan ?? data.weekly_plan)?.map((w, i) => (
-            // Day 0 always uses the authoritative standard rec (full safety
-            // pipeline applied). Horizon tabs only differentiate days 1–6.
-            <WorkoutCard
-              key={i}
-              plan={i === 0 && data.next_workout ? data.next_workout : w}
-              highlight={i === 0}
-            />
-          ))}
+        <div
+          className="overflow-x-auto -mx-4 px-4"
+          style={{ scrollbarWidth: "thin", scrollbarColor: "#334155 transparent" }}
+        >
+          <div className="space-y-3 min-w-[560px]">
+            {(horizonPayload?.weekly_plan ?? data.weekly_plan)?.map((w, i) => (
+              // Day 0 always uses the authoritative standard rec (full safety
+              // pipeline applied). Horizon tabs only differentiate days 1–6.
+              <WorkoutCard
+                key={i}
+                plan={i === 0 && data.next_workout ? data.next_workout : w}
+                highlight={i === 0}
+                recId={i === 0 ? data.id : undefined}
+              />
+            ))}
+          </div>
         </div>
       </div>
 
@@ -242,7 +252,19 @@ function InsightGrid({ insights }: { insights: CoachInsight[] }) {
   );
 }
 
-function WorkoutCard({ plan, highlight }: { plan: WorkoutPlan; highlight: boolean }) {
+function WorkoutCard({ plan, highlight, recId }: { plan: WorkoutPlan; highlight: boolean; recId?: string }) {
+  const [feedbackSent, setFeedbackSent] = useState<"accepted" | "rejected" | null>(null);
+
+  const feedback = useMutation({
+    mutationFn: (action: "accepted" | "rejected") =>
+      coachAPI.postFeedback(recId!, action),
+    onSuccess: (_data, action) => {
+      setFeedbackSent(action);
+      toast.success(action === "accepted" ? "Logged — great work!" : "Noted, we'll adjust future recommendations.");
+    },
+    onError: () => toast.error("Couldn't save feedback"),
+  });
+
   const labelDate = new Date();
   labelDate.setDate(labelDate.getDate() + plan.day_offset);
   const dayLabel =
@@ -268,7 +290,7 @@ function WorkoutCard({ plan, highlight }: { plan: WorkoutPlan; highlight: boolea
   return (
     <div
       className={cn(
-        "bg-surface-card border rounded-xl p-5 transition-colors",
+        "bg-surface-card border rounded-xl p-4 transition-colors",
         highlight ? "border-brand-500/40 bg-brand-500/5" : "border-surface-border"
       )}
     >
@@ -310,6 +332,36 @@ function WorkoutCard({ plan, highlight }: { plan: WorkoutPlan; highlight: boolea
         <p className="text-xs text-slate-500 italic border-t border-surface-border pt-2 mt-2">
           💡 {plan.rationale}
         </p>
+      )}
+
+      {/* Feedback widget — only on today's workout, only if not yet sent */}
+      {recId && (
+        <div className="border-t border-surface-border pt-3 mt-3">
+          {feedbackSent ? (
+            <p className="text-xs text-slate-500 flex items-center gap-1.5">
+              <CheckCircle className="w-3.5 h-3.5 text-emerald-500" />
+              {feedbackSent === "accepted" ? "Workout logged" : "Feedback saved"}
+            </p>
+          ) : (
+            <div className="flex items-center gap-2">
+              <span className="text-xs text-slate-500 flex-1">Did you complete this workout?</span>
+              <button
+                onClick={() => feedback.mutate("accepted")}
+                disabled={feedback.isPending}
+                className="flex items-center gap-1.5 text-xs px-3 py-1.5 rounded-lg bg-emerald-500/10 border border-emerald-500/25 text-emerald-400 hover:bg-emerald-500/20 transition-colors disabled:opacity-50"
+              >
+                <ThumbsUp className="w-3 h-3" /> Yes
+              </button>
+              <button
+                onClick={() => feedback.mutate("rejected")}
+                disabled={feedback.isPending}
+                className="flex items-center gap-1.5 text-xs px-3 py-1.5 rounded-lg bg-slate-500/10 border border-slate-500/25 text-slate-400 hover:bg-slate-500/20 transition-colors disabled:opacity-50"
+              >
+                <ThumbsDown className="w-3 h-3" /> No
+              </button>
+            </div>
+          )}
+        </div>
       )}
     </div>
   );
@@ -373,8 +425,10 @@ function MacrocycleCard({ macro }: { macro: Macrocycle }) {
   });
 
   return (
-    <div className="bg-surface-card border border-surface-border rounded-2xl p-5 space-y-4">
-      <div className="flex items-start justify-between gap-3 flex-wrap">
+    <div className="bg-surface-card border border-surface-border rounded-2xl">
+      {/* Sticky header — always visible */}
+      <div className="px-5 pt-5 pb-3 border-b border-surface-border">
+        <div className="flex items-start justify-between gap-3 flex-wrap">
         <div>
           <h2 className="text-lg font-semibold text-white flex items-center gap-2">
             <Target className="w-5 h-5 text-brand-400" />
@@ -393,44 +447,48 @@ function MacrocycleCard({ macro }: { macro: Macrocycle }) {
         )}>
           {macro.feasibility}
         </span>
-      </div>
-
-      {/* CTL ramp summary */}
-      <div className="grid grid-cols-3 gap-3 text-center">
-        <div className="bg-surface-bg border border-surface-border rounded-xl p-3">
-          <div className="text-[10px] uppercase tracking-wide text-slate-500">Current CTL</div>
-          <div className="text-xl font-bold text-white mt-1">{macro.current_ctl.toFixed(0)}</div>
-        </div>
-        <div className="bg-surface-bg border border-surface-border rounded-xl p-3">
-          <div className="text-[10px] uppercase tracking-wide text-slate-500">Peak Target</div>
-          <div className="text-xl font-bold text-brand-400 mt-1">{macro.peak_ctl_target.toFixed(0)}</div>
-        </div>
-        <div className="bg-surface-bg border border-surface-border rounded-xl p-3">
-          <div className="text-[10px] uppercase tracking-wide text-slate-500">Race-day TSB</div>
-          <div className="text-xl font-bold text-emerald-400 mt-1">+{macro.planned_tsb_event.toFixed(0)}</div>
         </div>
       </div>
 
-      {/* Week-by-week strip */}
-      <div>
-        <div className="text-xs font-medium text-slate-400 mb-2">Weekly schedule</div>
-        <div className="overflow-x-auto -mx-1 px-1">
-          <div className="flex gap-2 min-w-max pb-1">
-            {macro.weeks.map((w) => (
-              <MacrocycleWeekCell key={w.week_index} week={w} />
-            ))}
+      {/* Body */}
+      <div className="px-5 py-4 space-y-4">
+        {/* CTL ramp summary */}
+        <div className="grid grid-cols-3 gap-3 text-center">
+          <div className="bg-surface-bg border border-surface-border rounded-xl p-3">
+            <div className="text-[10px] uppercase tracking-wide text-slate-500">Current CTL</div>
+            <div className="text-xl font-bold text-white mt-1">{macro.current_ctl.toFixed(0)}</div>
+          </div>
+          <div className="bg-surface-bg border border-surface-border rounded-xl p-3">
+            <div className="text-[10px] uppercase tracking-wide text-slate-500">Peak Target</div>
+            <div className="text-xl font-bold text-brand-400 mt-1">{macro.peak_ctl_target.toFixed(0)}</div>
+          </div>
+          <div className="bg-surface-bg border border-surface-border rounded-xl p-3">
+            <div className="text-[10px] uppercase tracking-wide text-slate-500">Race-day TSB</div>
+            <div className="text-xl font-bold text-emerald-400 mt-1">+{macro.planned_tsb_event.toFixed(0)}</div>
           </div>
         </div>
-      </div>
 
-      {/* Plan summary */}
-      {macro.summary?.length > 0 && (
-        <ul className="text-xs text-slate-400 space-y-1 pt-1 border-t border-surface-border">
-          {macro.summary.map((s, i) => (
-            <li key={i} className="flex gap-2"><span className="text-slate-600">·</span>{s}</li>
-          ))}
-        </ul>
-      )}
+        {/* Week-by-week strip */}
+        <div>
+          <div className="text-xs font-medium text-slate-400 mb-2">Weekly schedule</div>
+          <div className="overflow-x-auto -mx-1 px-1">
+            <div className="flex gap-2 min-w-max pb-1">
+              {macro.weeks.map((w) => (
+                <MacrocycleWeekCell key={w.week_index} week={w} />
+              ))}
+            </div>
+          </div>
+        </div>
+
+        {/* Plan summary */}
+        {macro.summary?.length > 0 && (
+          <ul className="text-xs text-slate-400 space-y-1 pt-1 border-t border-surface-border">
+            {macro.summary.map((s, i) => (
+              <li key={i} className="flex gap-2"><span className="text-slate-600">·</span>{s}</li>
+            ))}
+          </ul>
+        )}
+      </div>
     </div>
   );
 }
@@ -491,6 +549,8 @@ function HorizonPicker({
     event:  "Event peak",
   };
 
+  const activeH = activeHorizon && multi.horizons[activeHorizon] ? multi.horizons[activeHorizon]! : null;
+
   return (
     <div className="bg-surface-card border border-surface-border rounded-2xl p-4">
       <div className="flex items-center justify-between mb-3">
@@ -503,15 +563,50 @@ function HorizonPicker({
           )}
         </div>
         {isUserOverride && (
-          <button
-            onClick={() => onSelect(null)}
-            className="text-xs text-slate-400 hover:text-white"
-          >
-            Reset to auto
+          <button onClick={() => onSelect(null)} className="text-xs text-slate-400 hover:text-white">
+            Reset
           </button>
         )}
       </div>
-      <div className="grid grid-cols-3 gap-2">
+
+      {/* ── Mobile: compact tab strip ── */}
+      <div className="flex sm:hidden gap-2 mb-3">
+        {present.map((key) => {
+          const active = activeHorizon === key;
+          const isAuto = !isUserOverride && multi.active_horizon === key;
+          return (
+            <button
+              key={key}
+              onClick={() => onSelect(key)}
+              className={cn(
+                "flex-1 flex flex-col items-center gap-1 py-2 px-1 rounded-xl border text-xs font-medium transition-colors",
+                active
+                  ? "bg-brand-500/10 border-brand-500/40 text-brand-400"
+                  : "border-surface-border text-slate-400"
+              )}
+            >
+              {ICONS[key]}
+              <span className="leading-tight text-center">{TITLES[key]}</span>
+              {isAuto && <span className="text-[9px] text-brand-400">AI</span>}
+            </button>
+          );
+        })}
+      </div>
+
+      {/* Mobile: selected horizon details */}
+      {activeH && (
+        <div className="sm:hidden text-xs text-slate-400 space-y-0.5 mb-1">
+          <div className="font-medium text-slate-300">{activeH.horizon_label}</div>
+          <div className="flex flex-wrap gap-x-3 gap-y-0.5 text-slate-500">
+            <span>{activeH.next_workout?.duration_minutes ?? 0} min</span>
+            <span>TSS {activeH.next_workout?.target_tss ?? 0}</span>
+            <span className="capitalize">{activeH.next_workout?.workout_type?.replace("_", " ")}</span>
+          </div>
+        </div>
+      )}
+
+      {/* ── Desktop: full cards ── */}
+      <div className="hidden sm:grid grid-cols-3 gap-2">
         {present.map((key) => {
           const h = multi.horizons[key]!;
           const active = activeHorizon === key;
@@ -536,17 +631,13 @@ function HorizonPicker({
                   </span>
                 )}
               </div>
-              <div className="text-xs text-slate-400 mt-1 leading-snug">
-                {h.horizon_label}
-              </div>
-              <div className="text-xs text-slate-500 mt-1.5 flex items-center gap-2">
+              <div className="text-xs text-slate-400 mt-1 leading-snug">{h.horizon_label}</div>
+              <div className="text-xs text-slate-500 mt-1.5 flex flex-wrap gap-x-2 gap-y-0.5">
                 <span>{h.next_workout?.duration_minutes ?? 0} min</span>
                 <span>·</span>
                 <span>TSS {h.next_workout?.target_tss ?? 0}</span>
                 <span>·</span>
-                <span className="capitalize">
-                  {h.next_workout?.workout_type?.replace("_", " ")}
-                </span>
+                <span className="capitalize">{h.next_workout?.workout_type?.replace("_", " ")}</span>
               </div>
             </button>
           );

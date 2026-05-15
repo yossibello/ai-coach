@@ -106,6 +106,15 @@ class PredictionOutcome(Base):
     duration_abs_err_min: Mapped[float | None] = mapped_column(Float, nullable=True)
     ftp_delta_abs_err_w:  Mapped[float | None] = mapped_column(Float, nullable=True)
 
+    # Average HRV z-score in the 7 days after the recommendation.
+    # Positive = athlete was recovering well; negative = accumulated fatigue.
+    avg_hrv_recovery: Mapped[float | None] = mapped_column(Float, nullable=True)
+
+    # Training signal weight for LoRA fine-tuning (0–1).
+    # 0.2 base + 0.3 if accepted + 0.3 if ftp improved + 0.2 if HRV recovered.
+    # Near-zero for athletes who ignored recommendations and got weaker.
+    outcome_weight: Mapped[float | None] = mapped_column(Float, nullable=True)
+
     measured_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )
