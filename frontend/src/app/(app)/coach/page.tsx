@@ -144,7 +144,7 @@ export default function CoachPage() {
 
       {/* Macrocycle: reverse-periodization plan to event date */}
       {macro && !macro.error && macro.weeks && macro.weeks.length > 0 && (
-        <MacrocycleCard macro={macro} />
+        <MacrocycleCard macro={macro} activeHorizon={activeHorizon} horizonPayload={horizonPayload} />
       )}
 
       {/* Risks */}
@@ -597,44 +597,75 @@ const FEASIBILITY_BADGE: Record<Macrocycle["feasibility"], string> = {
   unrealistic:  "bg-red-500/10 border-red-500/30 text-red-300",
 };
 
-function MacrocycleCard({ macro }: { macro: Macrocycle }) {
+function MacrocycleCard({
+  macro,
+  activeHorizon,
+  horizonPayload,
+}: {
+  macro: Macrocycle;
+  activeHorizon: HorizonKey | null;
+  horizonPayload: HorizonPayload | undefined;
+}) {
   const eventDate = new Date(macro.event_date);
   const eventLabel = eventDate.toLocaleDateString(undefined, {
     weekday: "short", month: "short", day: "numeric",
   });
 
+  // How many weeks are "in scope" for the active horizon
+  const inScopeWeeks =
+    activeHorizon === "short"  ? 1 :
+    activeHorizon === "medium" ? 4 :
+    macro.weeks.length;
+
+  // Card title changes to match the selected horizon
+  const cardTitle =
+    activeHorizon === "short"  ? "This Week" :
+    activeHorizon === "medium" ? "Next 4 Weeks" :
+    `Plan to ${macro.event_name || "event"}`;
+
+  const horizonSubtitle = horizonPayload?.horizon_label;
+
+  // CTL stat labels change per horizon
+  const ctlLabel =
+    activeHorizon === "short"  ? "Current CTL" :
+    activeHorizon === "medium" ? "Current CTL" :
+    "Current CTL";
+
   return (
     <div className="bg-surface-card border border-surface-border rounded-2xl">
-      {/* Sticky header — always visible */}
+      {/* Header */}
       <div className="px-5 pt-5 pb-3 border-b border-surface-border">
         <div className="flex items-start justify-between gap-3 flex-wrap">
-        <div>
-          <h2 className="text-lg font-semibold text-white flex items-center gap-2">
-            <Target className="w-5 h-5 text-brand-400" />
-            Macrocycle to {macro.event_name || "event"}
-          </h2>
-          <p className="text-xs text-slate-400 mt-1">
-            {eventLabel} · {macro.days_to_event} days · {macro.weeks_to_event} weeks
-            {macro.event_type && (
-              <span className="ml-1 capitalize">· {macro.event_type.replace(/_/g, " ")}</span>
-            )}
-          </p>
-        </div>
-        <span className={cn(
-          "text-xs px-2.5 py-1 rounded-full border capitalize",
-          FEASIBILITY_BADGE[macro.feasibility]
-        )}>
-          {macro.feasibility}
-        </span>
+          <div>
+            <h2 className="text-lg font-semibold text-white flex items-center gap-2">
+              <Target className="w-5 h-5 text-brand-400" />
+              {cardTitle}
+            </h2>
+            <p className="text-xs text-slate-400 mt-1">
+              {horizonSubtitle
+                ? <span className="text-brand-400/80">{horizonSubtitle}</span>
+                : <>{eventLabel} · {macro.days_to_event} days · {macro.weeks_to_event} weeks</>
+              }
+              {macro.event_type && activeHorizon === "event" && (
+                <span className="ml-1 capitalize">· {macro.event_type.replace(/_/g, " ")}</span>
+              )}
+            </p>
+          </div>
+          <span className={cn(
+            "text-xs px-2.5 py-1 rounded-full border capitalize",
+            FEASIBILITY_BADGE[macro.feasibility]
+          )}>
+            {macro.feasibility}
+          </span>
         </div>
       </div>
 
       {/* Body */}
       <div className="px-5 py-4 space-y-4">
-        {/* CTL ramp summary */}
+        {/* CTL stats — always useful regardless of horizon */}
         <div className="grid grid-cols-3 gap-3 text-center">
           <div className="bg-surface-bg border border-surface-border rounded-xl p-3">
-            <div className="text-[10px] uppercase tracking-wide text-slate-500">Current CTL</div>
+            <div className="text-[10px] uppercase tracking-wide text-slate-500">{ctlLabel}</div>
             <div className="text-xl font-bold text-white mt-1">{macro.current_ctl.toFixed(0)}</div>
           </div>
           <div className="bg-surface-bg border border-surface-border rounded-xl p-3">
@@ -642,18 +673,32 @@ function MacrocycleCard({ macro }: { macro: Macrocycle }) {
             <div className="text-xl font-bold text-brand-400 mt-1">{macro.peak_ctl_target.toFixed(0)}</div>
           </div>
           <div className="bg-surface-bg border border-surface-border rounded-xl p-3">
-            <div className="text-[10px] uppercase tracking-wide text-slate-500">Race-day TSB</div>
+            <div className="text-[10px] uppercase tracking-wide text-slate-500">
+              {activeHorizon === "event" ? "Race-day TSB" : "Planned TSB"}
+            </div>
             <div className="text-xl font-bold text-emerald-400 mt-1">+{macro.planned_tsb_event.toFixed(0)}</div>
           </div>
         </div>
 
-        {/* Week-by-week strip */}
+        {/* Week-by-week strip — in-scope weeks highlighted, out-of-scope dimmed */}
         <div>
-          <div className="text-xs font-medium text-slate-400 mb-2">Weekly schedule</div>
+          <div className="text-xs font-medium text-slate-400 mb-2 flex items-center gap-2">
+            Weekly schedule
+            {inScopeWeeks < macro.weeks.length && (
+              <span className="text-[10px] text-slate-600">
+                · first {inScopeWeeks} week{inScopeWeeks > 1 ? "s" : ""} in focus
+              </span>
+            )}
+          </div>
           <div className="overflow-x-auto -mx-1 px-1">
             <div className="flex gap-2 min-w-max pb-1">
               {macro.weeks.map((w) => (
-                <MacrocycleWeekCell key={w.week_index} week={w} />
+                <MacrocycleWeekCell
+                  key={w.week_index}
+                  week={w}
+                  isInScope={w.week_index < inScopeWeeks}
+                  dimmed={w.week_index >= inScopeWeeks && inScopeWeeks < macro.weeks.length}
+                />
               ))}
             </div>
           </div>
@@ -672,7 +717,15 @@ function MacrocycleCard({ macro }: { macro: Macrocycle }) {
   );
 }
 
-function MacrocycleWeekCell({ week }: { week: MacrocycleWeek }) {
+function MacrocycleWeekCell({
+  week,
+  isInScope = true,
+  dimmed = false,
+}: {
+  week: MacrocycleWeek;
+  isInScope?: boolean;
+  dimmed?: boolean;
+}) {
   const date = new Date(week.week_start);
   const label = date.toLocaleDateString(undefined, { month: "short", day: "numeric" });
   const phaseStyle = PHASE_STYLES[week.phase] ?? PHASE_STYLES.build;
@@ -681,9 +734,11 @@ function MacrocycleWeekCell({ week }: { week: MacrocycleWeek }) {
     <div
       title={`${week.notes}\nFocus: ${week.workout_focus.join(", ")}`}
       className={cn(
-        "min-w-[88px] rounded-xl border p-2.5 text-center transition-transform hover:-translate-y-0.5",
+        "min-w-[88px] rounded-xl border p-2.5 text-center transition-all hover:-translate-y-0.5",
         phaseStyle,
         week.is_recovery_week && "ring-1 ring-slate-500/40 ring-offset-1 ring-offset-surface-card",
+        isInScope && "ring-2 ring-brand-500/50 ring-offset-1 ring-offset-surface-card scale-[1.03]",
+        dimmed && "opacity-30 scale-95",
       )}
     >
       <div className="text-[10px] opacity-70">W{week.week_index + 1} · {label}</div>
