@@ -288,9 +288,14 @@ async def generate_recommendation(user: User, db: AsyncSession) -> Recommendatio
     if approach != "none":
         from app.strength.scheduler import add_strength_to_plan
         from app.ml.cold_start import get_periodization_phase
-        weeks_out = int((profile.goal_event_date - datetime.utcnow()).days // 7) if (
-            profile and profile.goal_event_date
-        ) else 52
+        if profile and profile.goal_event_date:
+            ged = profile.goal_event_date
+            now = datetime.now(timezone.utc)
+            if ged.tzinfo is None:
+                ged = ged.replace(tzinfo=timezone.utc)
+            weeks_out = max(0, (ged - now).days // 7)
+        else:
+            weeks_out = 52
         phase = get_periodization_phase(weeks_out)
         payload["weekly_plan"] = add_strength_to_plan(
             payload["weekly_plan"], phase=phase, approach_key=approach
