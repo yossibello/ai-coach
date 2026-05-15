@@ -268,6 +268,13 @@ def build_cold_start_recommendation(
         ftp_delta = 8
         confidence = 0.65
 
+    # Inject strength sessions based on the athlete's chosen approach
+    approach = (profile.strength_approach or "friel") if profile else "friel"
+    if approach != "none":
+        from app.strength.scheduler import add_strength_to_plan
+        weekly_plan = add_strength_to_plan(weekly_plan, phase=phase, approach_key=approach)
+        next_workout = weekly_plan[0]
+
     return {
         "next_workout": next_workout,
         "weekly_plan": weekly_plan,

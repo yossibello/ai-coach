@@ -145,7 +145,23 @@ async def generate_recommendation(user: User, db: AsyncSession) -> Recommendatio
     )
     health_metrics: list[HealthMetric] = list(health_result.scalars().all())
     health_by_date = per_day_health_features(health_metrics)
-    readiness_snapshot = compute_readiness(health_metrics)
+
+    # ── HR drift assessment (aerobic decoupling across recent rides) ────────
+    from app.services.hr_drift import get_drift_assessment
+    drift_assessment = get_drift_assessment(
+        activities,
+        hrv_z=None,  # placeholder — updated after readiness is computed below
+    )
+    readiness_snapshot = compute_readiness(
+        health_metrics,
+        drift_state=drift_assessment.state,
+        drift_pct=drift_assessment.drift_pct,
+    )
+    # Re-run drift with actual HRV z-score now that readiness is computed.
+    drift_assessment = get_drift_assessment(
+        activities,
+        hrv_z=readiness_snapshot.hrv_z,
+    )
 
     recent_types = [a.workout_type for a in activities[-7:] if a.workout_type]
 
@@ -165,7 +181,7 @@ async def generate_recommendation(user: User, db: AsyncSession) -> Recommendatio
             profile, ctl, atl, tsb, recent_types, total_activities
         )
 
-    # Attach readiness so the UI / safety guard can use it.
+    # Attach readiness + drift so the UI / safety guard can use it.
     payload["readiness"] = {
         "score": readiness_snapshot.score,
         "status": readiness_snapshot.status,
@@ -176,9 +192,17 @@ async def generate_recommendation(user: User, db: AsyncSession) -> Recommendatio
         "drivers": readiness_snapshot.drivers,
         "advice": readiness_snapshot.advice,
     }
+    payload["drift"] = {
+        "state":              drift_assessment.state,
+        "drift_pct":          drift_assessment.drift_pct,
+        "trend":              drift_assessment.trend,
+        "overtraining_risk":  drift_assessment.overtraining_risk,
+        "action":             drift_assessment.action,
+        "note":               drift_assessment.note,
+    }
 
     # ── Hard safety pass: clamp duration / TSS / intensity to safe ranges ──
-    from app.safety.guards import apply_workout_safety, apply_weekly_plan_safety, apply_health_safety
+    from app.safety.guards import apply_workout_safety, apply_weekly_plan_safety, apply_health_safety, apply_drift_safety
 
     # Estimate last-week TSS from recent activities for ramp guard.
     # Activity dates from SQLite are naive; compare against a naive cutoff.
@@ -196,7 +220,13 @@ async def generate_recommendation(user: User, db: AsyncSession) -> Recommendatio
     safe_next, health_notes = apply_health_safety(
         safe_next, readiness=payload.get("readiness")
     )
-    next_notes = next_notes + health_notes
+    # Layer HR drift gating last (most sport-science specific).
+    safe_next, drift_notes = apply_drift_safety(
+        safe_next,
+        drift_state=drift_assessment.state,
+        drift_pct=drift_assessment.drift_pct,
+    )
+    next_notes = next_notes + health_notes + drift_notes
     payload["next_workout"] = safe_next
 
     # ── Already-rode-today guard ────────────────────────────────────────────
@@ -253,6 +283,19 @@ async def generate_recommendation(user: User, db: AsyncSession) -> Recommendatio
     if next_notes or plan_notes:
         payload.setdefault("safety_notes", []).extend(next_notes + plan_notes)
 
+    # ── Strength session injection ───────────────────────────────────────────
+    approach = (profile.strength_approach or "friel") if profile else "friel"
+    if approach != "none":
+        from app.strength.scheduler import add_strength_to_plan
+        from app.ml.cold_start import get_periodization_phase
+        weeks_out = int((profile.goal_event_date - datetime.utcnow()).days // 7) if (
+            profile and profile.goal_event_date
+        ) else 52
+        phase = get_periodization_phase(weeks_out)
+        payload["weekly_plan"] = add_strength_to_plan(
+            payload["weekly_plan"], phase=phase, approach_key=approach
+        )
+
     return Recommendation(
         user_id=user.id,
         confidence=payload["confidence"],
@@ -281,6 +324,7 @@ def _encode_profile_with_horizon(
         "cycling_experience_years":  p.cycling_experience_years if p else None,
         "primary_goal":              p.primary_goal if p else None,
         "days_to_event":             max(0, int(horizon_override_days)),
+        "training_days_per_week":    p.training_days_per_week if p else None,
     }
     return encode_profile_row(raw)
 
@@ -304,6 +348,15 @@ def _transformer_recommendation(
     """
     # Encode activity sequence
     profile_vec = _encode_profile_with_horizon(profile, horizon_override_days)
+
+    # Backwards-compat: if the loaded checkpoint was trained with fewer profile
+    # features (PROFILE_DIM grew when we added training_days_norm), truncate the
+    # profile vector so it still fits. New features are always appended last, so
+    # slicing from the front preserves the features the old model learned.
+    _checkpoint_input_dim = getattr(model, "_input_dim", INPUT_DIM)
+    _checkpoint_profile_dim = _checkpoint_input_dim - ACTIVITY_DIM
+    if 0 < _checkpoint_profile_dim < PROFILE_DIM:
+        profile_vec = profile_vec[:_checkpoint_profile_dim]
 
     seq_features = []
     day_indices = []
@@ -335,11 +388,10 @@ def _transformer_recommendation(
                 }
 
         act_vec = encode_activity(act, profile, _ctl, _atl, _tsb, days_since_last, **h_kwargs)
-        # Backwards-compat: an older checkpoint trained without health features
-        # expects ACTIVITY_DIM-4 columns. Slice off the trailing health block
-        # so the input projection shape matches.
-        expected_input = getattr(model, "_input_dim", INPUT_DIM)
-        expected_act = expected_input - PROFILE_DIM
+        # Backwards-compat: slice activity vector to whatever the checkpoint
+        # expects. _checkpoint_profile_dim was resolved above; activity features
+        # fill the rest of the token. New activity features are appended last.
+        expected_act = _checkpoint_input_dim - len(profile_vec)
         if act_vec.shape[0] > expected_act:
             act_vec = act_vec[:expected_act]
         token = np.concatenate([act_vec, profile_vec])
@@ -474,11 +526,15 @@ def _transformer_recommendation(
     if event_type_val and phase_for_plan in ("build", "peak"):
         phase_pattern = _bias_pattern_for_event(phase_pattern, event_type_val)
 
+    # Trim to the number of days the athlete actually trains per week.
+    training_days = (profile.training_days_per_week if profile and profile.training_days_per_week else 7)
+    phase_pattern = _trim_pattern_to_days(phase_pattern, training_days)
+
     weekly_plan = []
-    for i, wt in enumerate(phase_pattern):
+    for day_offset, wt in phase_pattern:
         t = WL.get(wt, WL["endurance"])
         weekly_plan.append({
-            "day_offset": i,
+            "day_offset": day_offset,
             "workout_type": wt,
             "duration_minutes": t["duration_minutes"],
             "description": t["description"],
@@ -761,12 +817,14 @@ async def generate_multi_horizon_recommendation(
             event_type_val = getattr(profile, "event_type", None) if profile else None
             if event_type_val and phase in ("build", "peak"):
                 phase_pattern = _bias_pattern_for_event(phase_pattern, event_type_val)
+            training_days = (profile.training_days_per_week if profile and profile.training_days_per_week else 7)
+            phase_pattern = _trim_pattern_to_days(phase_pattern, training_days)
             ftp_val = (profile.ftp if profile and profile.ftp else 200) or 200
             weekly_plan = []
-            for i, wt in enumerate(phase_pattern):
+            for day_offset, wt in phase_pattern:
                 t = WL.get(wt, WL["endurance"])
                 weekly_plan.append({
-                    "day_offset": i,
+                    "day_offset": day_offset,
                     "workout_type": wt,
                     "duration_minutes": t["duration_minutes"],
                     "description": t["description"],
@@ -806,6 +864,8 @@ async def generate_multi_horizon_recommendation(
         "event":  true_dte,
     }
 
+    training_days = (profile.training_days_per_week if profile and profile.training_days_per_week else 7)
+
     out: dict[str, dict] = {}
     for label, dte in horizons_to_run.items():
         payload = _transformer_recommendation(
@@ -813,12 +873,24 @@ async def generate_multi_horizon_recommendation(
             horizon_override_days=dte,
             health_by_date=health_by_date,
         )
-        # Apply "already rode today" shift so the coach page weekly_plan
-        # stays in sync with the standard recommendation's next_workout.
         _apply_today_ride_guard(payload, activities)
-        payload["horizon"]              = label
-        payload["horizon_days"]         = dte
-        payload["horizon_label"]        = _horizon_label(label, dte)
+
+        # Replace the static WEEKLY_PATTERNS template with autoregressive rollout:
+        # the model simulates days 1-6 based on accumulated fatigue from day-0,
+        # then prunes to training_days. This produces Friel-consistent gaps
+        # without hardcoded spreading rules.
+        rolled = _rollout_week(
+            model, activities, profile, ctl, atl, tsb,
+            day0_workout=payload["next_workout"],
+            health_by_date=health_by_date,
+            training_days=training_days,
+            horizon_override_days=dte,
+        )
+        payload["weekly_plan"] = rolled
+
+        payload["horizon"]       = label
+        payload["horizon_days"]  = dte
+        payload["horizon_label"] = _horizon_label(label, dte)
         out[label] = payload
 
     # Pick the active horizon: prefer 'event' if user has one set, else 'medium'.
@@ -839,6 +911,133 @@ async def generate_multi_horizon_recommendation(
         "active_horizon": active,
         "supplements":    supplements,
     }
+
+
+def _rollout_week(
+    model,
+    activities: list,
+    profile,
+    ctl: float,
+    atl: float,
+    tsb: float,
+    day0_workout: dict,
+    health_by_date: dict | None,
+    training_days: int,
+    horizon_override_days: int | None,
+) -> list[dict]:
+    """Build a weekly plan anchored on the transformer's day-0 prediction.
+
+    Days 1-6 come from the phase-appropriate WEEKLY_PATTERNS template rather
+    than autoregressive model calls.  The autoregressive approach caused a
+    feedback loop: injecting light fake activities made the model keep
+    predicting recovery for every subsequent day.
+
+    The pattern is trimmed to exactly training_days sessions using
+    Friel/Coggan recovery-gap spacing (_trim_pattern_to_days).
+    """
+    from app.ml.cold_start import (
+        WORKOUT_LIBRARY as WL,
+        WEEKLY_PATTERNS,
+        get_periodization_phase,
+        _bias_pattern_for_event,
+    )
+
+    ftp = (profile.ftp if profile and profile.ftp else 200) or 200
+
+    dte_for_plan = horizon_override_days if horizon_override_days is not None else (
+        (profile.goal_event_date.replace(tzinfo=timezone.utc) - datetime.now(timezone.utc)).days
+        if profile and getattr(profile, "goal_event_date", None) else 90
+    )
+    weeks_for_plan = max(0, dte_for_plan // 7)
+    phase_for_plan = get_periodization_phase(weeks_for_plan)
+
+    phase_pattern = list(WEEKLY_PATTERNS.get(phase_for_plan, WEEKLY_PATTERNS["build"]))
+    day0_type = day0_workout.get("workout_type", phase_pattern[0])
+    phase_pattern[0] = day0_type
+
+    event_type_val = getattr(profile, "event_type", None) if profile else None
+    if event_type_val and phase_for_plan in ("build", "peak"):
+        phase_pattern = _bias_pattern_for_event(phase_pattern, event_type_val)
+
+    phase_pattern = _trim_pattern_to_days(phase_pattern, training_days)
+
+    day0 = dict(day0_workout)
+    day0["day_offset"] = 0
+    weekly_plan = [day0]
+
+    for day_offset, wt in phase_pattern[1:]:
+        t = WL.get(wt, WL["endurance"])
+        weekly_plan.append({
+            "day_offset": day_offset,
+            "workout_type": wt,
+            "duration_minutes": t["duration_minutes"],
+            "description": t["description"],
+            "structure": [dict(s) for s in t["structures"]],
+            "target_tss": t["target_tss"],
+            "rationale": t["rationale"],
+            "key_metric": t["key_metric"].format(
+                z2_lo=int(ftp * 0.56), z2_hi=int(ftp * 0.75)
+            ),
+        })
+
+    return weekly_plan
+
+
+_RECOVERY_DAYS_NEEDED: dict[str, int] = {
+    # Coggan/Friel: hard sessions need 48-72 h before the next hard effort.
+    "vo2max":    2,   # maximal stress — full 2 rest days before next session
+    "threshold": 2,   # sustained high stress
+    "sprint":    2,
+    "race":      2,
+    "sweetspot": 1,   # sub-threshold — one easy day is enough
+    "tempo":     1,
+    "long_ride": 1,   # volume stress rather than intensity
+    "endurance": 0,   # zone 2 can be done back-to-back
+    "recovery":  0,
+    "easy":      0,
+}
+
+
+def _trim_pattern_to_days(pattern: list[str], training_days: int) -> list[tuple[int, str]]:
+    """Return (day_offset, workout_type) pairs for training_days sessions placed
+    across a 7-day week using Friel/Coggan recovery rules.
+
+    Each session is scheduled on the earliest available day that satisfies the
+    minimum recovery gap required after the previous session's intensity.
+    Day 0 is always the immediate next workout (the transformer's pick).
+
+    Examples for 4 training days:
+      [threshold(0), sweetspot(3), endurance(5), long_ride(6)]  — not evenly
+      spaced, but respects the 2-day recovery needed after threshold.
+    """
+    if training_days >= len(pattern):
+        return list(enumerate(pattern))
+
+    day0 = pattern[0]
+    rest = pattern[1:]
+    non_recovery = [wt for wt in rest if wt != "recovery"]
+    recovery_spins = [wt for wt in rest if wt == "recovery"]
+    needed = training_days - 1
+    workouts = [day0] + (non_recovery + recovery_spins)[:needed]
+
+    offsets: list[int] = [0]
+    current_day = 0
+    for wt in workouts[1:]:
+        prev_wt = workouts[offsets.index(current_day)] if current_day in offsets else workouts[-1]
+        # How many rest days does the previous session demand?
+        gap = _RECOVERY_DAYS_NEEDED.get(prev_wt, 1)
+        # New sessions can start the day after the gap (gap=1 → next day ok,
+        # gap=2 → skip two days first).
+        current_day = min(current_day + gap + 1, 6)
+        offsets.append(current_day)
+
+    # If we ran out of room (multiple sessions landed on day 6), spread the
+    # overflow backwards so no two sessions share the same day.
+    for i in range(len(offsets) - 1, 0, -1):
+        if offsets[i] <= offsets[i - 1]:
+            offsets[i - 1] = max(0, offsets[i] - 1)
+
+    return list(zip(offsets, workouts))
 
 
 def _horizon_label(label: str, days: int) -> str:
@@ -872,9 +1071,11 @@ async def _supplement_stack_for_user(
     from app.models.nutrition import BloodTest
     from app.nutrition.engine import recommend_supplements
 
-    # Last 28 d windows
-    cutoff = datetime.now(timezone.utc) - timedelta(days=28)
-    recent = [a for a in activities if a.date and a.date >= cutoff.replace(tzinfo=None)] \
+    # Last 28 d windows — strip tz from both sides: Postgres TIMESTAMPTZ returns
+    # aware datetimes but older SQLite rows may be naive; normalise to naive.
+    cutoff_naive = (datetime.now(timezone.utc) - timedelta(days=28)).replace(tzinfo=None)
+    def _n(d): return d.replace(tzinfo=None) if d.tzinfo else d
+    recent = [a for a in activities if a.date and _n(a.date) >= cutoff_naive] \
         if activities else []
     total_seconds = sum((a.duration_seconds or 0) for a in recent)
     weekly_hours = (total_seconds / 3600.0) / 4.0

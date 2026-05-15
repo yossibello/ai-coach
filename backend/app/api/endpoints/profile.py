@@ -32,6 +32,7 @@ class ProfileOut(BaseModel):
     climate: Optional[str] = None
     event_type: Optional[str] = None
     recent_illness_count_3m: Optional[int] = None
+    strength_approach: Optional[str] = None
 
 
 class ProfileUpdate(BaseModel):
@@ -52,6 +53,7 @@ class ProfileUpdate(BaseModel):
     climate: Optional[str] = None
     event_type: Optional[str] = None
     recent_illness_count_3m: Optional[int] = None
+    strength_approach: Optional[str] = None
 
 
 @router.get("", response_model=ProfileOut)
@@ -120,4 +122,5 @@ def _profile_out(p: AthleteProfile) -> ProfileOut:
         climate=p.climate,
         event_type=p.event_type,
         recent_illness_count_3m=p.recent_illness_count_3m,
+        strength_approach=p.strength_approach or "friel",
     )

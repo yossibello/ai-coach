@@ -119,6 +119,10 @@ class AthleteProfile(Base):
     # Self-reported illness episodes (URTI, GI, etc.) in last 3 months — RED-S / immunity proxy.
     recent_illness_count_3m: Mapped[int | None] = mapped_column(nullable=True)
 
+    # ── Strength training ────────────────────────────────────────────────────
+    # 'friel' | 'minimum_dose' | 'grease_the_groove' | 'none'
+    strength_approach: Mapped[str | None] = mapped_column(String(30), nullable=True, default="friel")
+
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()

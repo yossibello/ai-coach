@@ -3,7 +3,7 @@
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useState, useMemo, useCallback } from "react";
 import { coachAPI } from "@/lib/api";
-import { Brain, RefreshCw, AlertTriangle, CheckCircle, Info, Zap, Calendar, Target, ThumbsUp, ThumbsDown, X } from "lucide-react";
+import { Brain, RefreshCw, AlertTriangle, CheckCircle, Info, Zap, Calendar, Target, ThumbsUp, ThumbsDown, X, Dumbbell, ChevronDown, ChevronUp } from "lucide-react";
 import { cn, formatDuration } from "@/lib/utils";
 import type { CoachRecommendation, WorkoutPlan, CoachInsight, TrainingRisk, HorizonKey, HorizonPayload, Macrocycle, MacrocycleWeek } from "@/types";
 import toast from "react-hot-toast";
@@ -252,7 +252,9 @@ function InsightGrid({ insights }: { insights: CoachInsight[] }) {
   );
 }
 
-function WorkoutCard({ plan, highlight, recId }: { plan: WorkoutPlan; highlight: boolean; recId?: string }) {
+function WorkoutCard({ plan, highlight, recId }: { plan: WorkoutPlan & { is_strength?: boolean; strength_session?: any; strength_addon?: any; gtg_practice?: any }; highlight: boolean; recId?: string }) {
+  if (plan.is_strength) return <StrengthCard plan={plan} highlight={highlight} />;
+
   const [feedbackSent, setFeedbackSent] = useState<"accepted" | "rejected" | null>(null);
 
   const feedback = useMutation({
@@ -334,6 +336,45 @@ function WorkoutCard({ plan, highlight, recId }: { plan: WorkoutPlan; highlight:
         </p>
       )}
 
+      {/* Strength add-on after easy ride */}
+      {plan.strength_addon && (
+        <div className="border-t border-surface-border pt-3 mt-3">
+          <div className="flex items-center gap-2 mb-2">
+            <Dumbbell className="w-3.5 h-3.5 text-violet-400" />
+            <span className="text-xs font-medium text-violet-400">
+              Add-on: {plan.strength_addon.name}
+            </span>
+            <span className="text-xs text-slate-500">
+              {plan.strength_addon.duration_minutes} min after this ride
+            </span>
+          </div>
+          <SessionExerciseList session={plan.strength_addon} />
+        </div>
+      )}
+
+      {/* GTG daily practice badge */}
+      {plan.gtg_practice && (
+        <div className="border-t border-surface-border pt-3 mt-3">
+          <div className="flex items-center gap-2 mb-1">
+            <Dumbbell className="w-3.5 h-3.5 text-emerald-400" />
+            <span className="text-xs font-medium text-emerald-400">GTG today</span>
+            <span className="text-xs text-slate-500">
+              5 reps every 1-2h throughout the day
+            </span>
+          </div>
+          <div className="flex gap-2 flex-wrap mt-1">
+            {plan.gtg_practice.exercises?.map((ex: any, i: number) => (
+              <span
+                key={i}
+                className="text-[11px] px-2 py-0.5 rounded-full bg-emerald-500/10 border border-emerald-500/20 text-emerald-300 capitalize"
+              >
+                {ex.name.replace(/_/g, " ")} × {ex.reps}
+              </span>
+            ))}
+          </div>
+        </div>
+      )}
+
       {/* Feedback widget — only on today's workout, only if not yet sent */}
       {recId && (
         <div className="border-t border-surface-border pt-3 mt-3">
@@ -362,6 +403,143 @@ function WorkoutCard({ plan, highlight, recId }: { plan: WorkoutPlan; highlight:
             </div>
           )}
         </div>
+      )}
+    </div>
+  );
+}
+
+// ─── Strength training components ───────────────────────────────────────────
+
+function ExerciseRow({ ex }: { ex: any }) {
+  const [open, setOpen] = useState(false);
+  const restLabel =
+    ex.rest_sec >= 60
+      ? `${Math.round(ex.rest_sec / 60)} min rest`
+      : ex.rest_sec > 0
+      ? `${ex.rest_sec}s rest`
+      : "";
+
+  return (
+    <div className="text-sm">
+      <button onClick={() => setOpen(!open)} className="flex items-start gap-3 w-full text-left">
+        <div className="flex-1 min-w-0">
+          <div className="flex items-center gap-2 flex-wrap">
+            <span className="font-medium text-white capitalize">
+              {ex.name.replace(/_/g, " ")}
+            </span>
+            <span className="text-xs text-violet-400">
+              {ex.sets}×{ex.reps}
+            </span>
+            {restLabel && <span className="text-xs text-slate-500">{restLabel}</span>}
+          </div>
+          <div className="text-xs text-slate-500 mt-0.5 truncate">
+            {ex.equipment} · {ex.cycling_benefit}
+          </div>
+        </div>
+        {open ? (
+          <ChevronUp className="w-3.5 h-3.5 text-slate-500 flex-shrink-0 mt-0.5" />
+        ) : (
+          <ChevronDown className="w-3.5 h-3.5 text-slate-500 flex-shrink-0 mt-0.5" />
+        )}
+      </button>
+      {open && (
+        <div className="mt-2 space-y-1.5 text-xs text-slate-400 pl-0">
+          <p className="leading-relaxed">{ex.description}</p>
+          {ex.cue && (
+            <p className="text-brand-400 font-medium">Cue: {ex.cue}</p>
+          )}
+          {ex.weight_guidance && (
+            <p className="text-amber-400/80">Weight: {ex.weight_guidance}</p>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function SessionExerciseList({ session }: { session: any }) {
+  const [expanded, setExpanded] = useState(false);
+  return (
+    <>
+      <button
+        onClick={() => setExpanded(!expanded)}
+        className="flex items-center gap-2 text-xs text-slate-400 hover:text-white transition-colors w-full mt-2"
+      >
+        <span>{session.exercises.length} exercises</span>
+        {expanded ? (
+          <ChevronUp className="w-3.5 h-3.5 ml-auto" />
+        ) : (
+          <ChevronDown className="w-3.5 h-3.5 ml-auto" />
+        )}
+      </button>
+      {expanded && (
+        <div className="mt-3 space-y-3 border-t border-surface-border pt-3">
+          {session.exercises.map((ex: any, i: number) => (
+            <ExerciseRow key={i} ex={ex} />
+          ))}
+        </div>
+      )}
+    </>
+  );
+}
+
+function StrengthCard({
+  plan,
+  highlight,
+}: {
+  plan: WorkoutPlan & { strength_session?: any };
+  highlight: boolean;
+}) {
+  const session = plan.strength_session;
+  if (!session) return null;
+
+  const labelDate = new Date();
+  labelDate.setDate(labelDate.getDate() + plan.day_offset);
+  const dayLabel =
+    plan.day_offset === 0
+      ? "Today"
+      : plan.day_offset === 1
+      ? "Tomorrow"
+      : labelDate.toLocaleDateString(undefined, {
+          weekday: "short",
+          month: "short",
+          day: "numeric",
+        });
+
+  return (
+    <div
+      className={cn(
+        "bg-surface-card border rounded-xl p-4 transition-colors",
+        highlight
+          ? "border-violet-500/40 bg-violet-500/5"
+          : "border-surface-border"
+      )}
+    >
+      <div className="flex items-start justify-between gap-3 mb-3">
+        <div className="min-w-0">
+          <div className="flex items-center gap-2 mb-1 flex-wrap">
+            <span className="text-xs text-slate-500 font-medium">{dayLabel}</span>
+            <span className="text-xs px-2 py-0.5 rounded-full border font-medium bg-violet-500/10 border-violet-500/20 text-violet-400">
+              Strength
+            </span>
+            <span className="text-xs text-slate-400">{session.phase_label}</span>
+          </div>
+          <span className="font-semibold text-white">{session.name}</span>
+          <div className="text-xs text-slate-400 mt-0.5">
+            {session.duration_minutes} min · TSS ~{plan.target_tss}
+          </div>
+        </div>
+        <Dumbbell className="w-5 h-5 text-violet-400 flex-shrink-0 mt-1" />
+      </div>
+
+      <p className="text-sm text-slate-400 mb-2 leading-relaxed">{session.notes}</p>
+
+      <SessionExerciseList session={session} />
+
+      {plan.rationale && (
+        <p className="text-xs text-slate-500 italic border-t border-surface-border pt-2 mt-3">
+          💡 {plan.rationale}
+        </p>
       )}
     </div>
   );

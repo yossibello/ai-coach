@@ -70,6 +70,9 @@ async def init_db():
                 "avg_hrv_recovery": "REAL",
                 "outcome_weight":   "REAL",
             })
+            await _ensure_columns(conn, "athlete_profiles", {
+                "strength_approach": "VARCHAR(30)",
+            })
         else:
             # Postgres: idempotently add any new columns not created by CREATE TABLE
             await _ensure_columns_pg(conn, "activities", {
@@ -78,6 +81,9 @@ async def init_db():
             await _ensure_columns_pg(conn, "prediction_outcomes", {
                 "avg_hrv_recovery": "REAL",
                 "outcome_weight":   "REAL",
+            })
+            await _ensure_columns_pg(conn, "athlete_profiles", {
+                "strength_approach": "VARCHAR(30)",
             })
             await _ensure_columns_pg(conn, "users", {
                 "garmin_token_store": "TEXT",

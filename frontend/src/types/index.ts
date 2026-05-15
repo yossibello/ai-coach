@@ -40,6 +40,7 @@ export interface AthleteProfile {
     | "triathlon_70_3"
     | "triathlon_140_6";
   recent_illness_count_3m?: number;
+  strength_approach?: "friel" | "minimum_dose" | "grease_the_groove" | "none";
 }
 
 export type GoalType =

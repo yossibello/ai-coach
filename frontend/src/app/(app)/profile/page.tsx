@@ -8,6 +8,8 @@ import { User, Save, Loader2, Link2 } from "lucide-react";
 import toast from "react-hot-toast";
 import GarminConnect from "@/components/integrations/GarminConnect";
 import StravaConnect from "@/components/integrations/StravaConnect";
+import OuraConnect from "@/components/integrations/OuraConnect";
+import FitbitConnect from "@/components/integrations/FitbitConnect";
 
 const GOALS: { value: GoalType; label: string }[] = [
   { value: "general_fitness",  label: "General Fitness" },
@@ -128,6 +130,18 @@ export default function ProfilePage() {
         <Row label="Training days / week">
           <NumInput value={form.training_days_per_week} onChange={(v) => set("training_days_per_week", v)} min={1} max={7} />
         </Row>
+        <Row label="Strength approach" hint="How to integrate gym / bodyweight work">
+          <select
+            value={form.strength_approach ?? "friel"}
+            onChange={(e) => set("strength_approach", e.target.value as AthleteProfile["strength_approach"])}
+            className="input-field"
+          >
+            <option value="friel">Friel Periodized — phases match your cycling block (recommended)</option>
+            <option value="minimum_dose">Minimum Dose — 5 patterns, same session 2×/week, one kettlebell</option>
+            <option value="grease_the_groove">Grease the Groove — 5 reps every 1-2h, zero fatigue cost</option>
+            <option value="none">No strength training</option>
+          </select>
+        </Row>
         <Row label="Primary Goal">
           <select
             value={form.primary_goal ?? ""}
@@ -187,6 +201,8 @@ export default function ProfilePage() {
         <div className="space-y-4">
           <GarminConnect />
           <StravaConnect />
+          <OuraConnect />
+          <FitbitConnect />
         </div>
       </div>
 
