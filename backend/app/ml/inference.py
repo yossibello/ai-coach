@@ -102,14 +102,29 @@ def _inject_strength(
     payload: dict,
     profile: "AthleteProfile | None",
     days_to_event: int | None = None,
+    tsb: float = 0.0,
 ) -> None:
-    """Inject strength sessions into payload['weekly_plan'] and sync next_workout."""
+    """
+    Inject strength sessions into payload['weekly_plan'] and sync next_workout.
+
+    Fatigue guard (TSB = Training Stress Balance, positive = fresh):
+      tsb < -25 → skip strength entirely this week (athlete is too fatigued)
+      tsb < -10 → cap at 1 session max (reduce load)
+      tsb >= -10 → normal (approach's full sessions_per_week)
+    """
     from app.strength.scheduler import add_strength_to_plan
     from app.ml.cold_start import get_periodization_phase
 
     approach = (profile.strength_approach or "friel") if profile else "friel"
     if approach == "none":
         return
+
+    # Skip strength when athlete is heavily fatigued
+    if tsb < -25:
+        return
+
+    # Cap sessions when moderately fatigued
+    max_sessions = 1 if tsb < -10 else None
 
     if days_to_event is not None:
         weeks_out = max(0, days_to_event // 7)
@@ -124,7 +139,8 @@ def _inject_strength(
 
     phase = get_periodization_phase(weeks_out)
     payload["weekly_plan"] = add_strength_to_plan(
-        payload["weekly_plan"], phase=phase, approach_key=approach
+        payload["weekly_plan"], phase=phase, approach_key=approach,
+        max_sessions=max_sessions,
     )
     if payload["weekly_plan"]:
         payload["next_workout"] = payload["weekly_plan"][0]
@@ -315,7 +331,7 @@ async def generate_recommendation(user: User, db: AsyncSession) -> Recommendatio
     if next_notes or plan_notes:
         payload.setdefault("safety_notes", []).extend(next_notes + plan_notes)
 
-    _inject_strength(payload, profile)
+    _inject_strength(payload, profile, tsb=tsb)
 
     return Recommendation(
         user_id=user.id,
@@ -859,10 +875,10 @@ async def generate_multi_horizon_recommendation(
             cs["weekly_plan"] = weekly_plan
             cs["next_workout"] = weekly_plan[0]
             # Inject strength sessions into cold-start horizon plans
-            _inject_strength(cs, profile, wte * 7)
+            _inject_strength(cs, profile, wte * 7, tsb=tsb)
             cs["horizon"] = h_label
             cs["horizon_days"] = h_days
-            cs["horizon_label"] = _horizon_label(h_label, h_days)
+            cs["horizon_label"] = _horizon_label(h_label, h_days, profile)
             cs_horizons[h_label] = cs
 
         return {
@@ -911,11 +927,11 @@ async def generate_multi_horizon_recommendation(
         )
         payload["weekly_plan"] = rolled
         # Inject strength sessions into each horizon's weekly plan
-        _inject_strength(payload, profile, dte)
+        _inject_strength(payload, profile, dte, tsb=tsb)
 
         payload["horizon"]       = label
         payload["horizon_days"]  = dte
-        payload["horizon_label"] = _horizon_label(label, dte)
+        payload["horizon_label"] = _horizon_label(label, dte, profile)
         out[label] = payload
 
     # Pick the active horizon: prefer 'event' if user has one set, else 'medium'.
@@ -1065,17 +1081,28 @@ def _trim_pattern_to_days(pattern: list[str], training_days: int) -> list[tuple[
     return list(zip(offsets, workouts))
 
 
-def _horizon_label(label: str, days: int) -> str:
+EVENT_GOALS = {"event_specific", "gran_fondo", "criterium", "climbing", "triathlon"}
+
+
+def _horizon_label(label: str, days: int, profile: "AthleteProfile | None" = None) -> str:
+    has_event = bool(
+        profile
+        and profile.goal_event_date
+        and getattr(profile, "primary_goal", None) in EVENT_GOALS
+    )
     if label == "short":
-        return f"Max FTP gain in next {days} days"
+        return f"1-week gain · {days} days"
     if label == "medium":
-        return f"Best for {days}-day build"
+        return f"4-week build · {days} days"
     if label == "event":
+        if not has_event:
+            return f"Long-term base · {days} days"
+        event_name = profile.goal_event_name or "event"  # type: ignore[union-attr]
         if days <= 0:
-            return "Event today — race-day prep"
+            return f"{event_name} — race day!"
         if days <= 14:
-            return f"Peak for event in {days} days (taper window)"
-        return f"Best path to peak on event day ({days} days out)"
+            return f"{event_name} · {days}d — taper window"
+        return f"{event_name} · {days}d out"
     return label
 
 

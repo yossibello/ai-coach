@@ -116,19 +116,20 @@ def add_strength_to_plan(
     weekly_plan: list[dict],
     phase: str,
     approach_key: str = "friel",
+    max_sessions: int | None = None,
 ) -> list[dict]:
     """
-    Insert strength sessions into a 7-day cycling weekly plan.
+    Insert strength sessions into a cycling weekly plan.
 
     Args:
-        weekly_plan:  List of 7 day dicts (day_offset 0-6).
-        phase:        Cycling periodization phase (base_build, build, peak, recovery_week).
-        approach_key: One of 'friel', 'minimum_dose', 'grease_the_groove'.
+        weekly_plan:   List of day dicts (day_offset 0-N).
+        phase:         Cycling periodization phase.
+        approach_key:  One of 'friel', 'minimum_dose', 'grease_the_groove'.
+        max_sessions:  Hard cap on sessions this week (for fatigue management).
 
     Returns:
         The same weekly_plan with strength sessions added.
-        Days that already have a cycling workout get a combined entry;
-        rest days are replaced with the strength session.
+        Rest days are replaced; cycling days get a strength_addon.
     """
     approach = APPROACHES.get(approach_key)
     if approach is None:
@@ -142,8 +143,9 @@ def add_strength_to_plan(
     if not candidates:
         return weekly_plan
 
-    # Pick slots — up to len(sessions) candidate days
-    slots = candidates[: len(sessions)]
+    # Respect fatigue cap — never exceed max_sessions this week
+    cap = min(len(sessions), max_sessions) if max_sessions is not None else len(sessions)
+    slots = candidates[: cap]
 
     # Deduplicate session list if approach returns the same session twice (min_dose)
     session_list = sessions[: len(slots)]

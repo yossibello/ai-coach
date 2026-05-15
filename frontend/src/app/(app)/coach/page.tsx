@@ -722,10 +722,13 @@ function HorizonPicker({
     medium: <Calendar className="w-3.5 h-3.5" />,
     event:  <Target className="w-3.5 h-3.5" />,
   };
+  // "event" tab title comes from the backend label so it reflects whether
+  // the user has an actual event goal ("Alpe d'HuZes") or a generic one ("Long term")
+  const eventTitle = multi.horizons["event"]?.horizon_label?.split("·")[0].trim() ?? "Long term";
   const TITLES: Record<HorizonKey, string> = {
     short:  "Short term",
     medium: "Medium build",
-    event:  "Event peak",
+    event:  eventTitle,
   };
 
   const activeH = activeHorizon && multi.horizons[activeHorizon] ? multi.horizons[activeHorizon]! : null;
