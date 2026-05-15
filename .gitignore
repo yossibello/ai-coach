@@ -50,6 +50,7 @@ ml/data/*.csv
 # Ignore test/smoke checkpoints.
 backend/models/*.pt
 !backend/models/cycling_coach.pt
+!backend/models/cycling_coach_v*.pt
 
 # ── Logs ──────────────────────────────────────────────────────────────────────
 *.log
