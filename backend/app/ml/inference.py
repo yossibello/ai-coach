@@ -295,6 +295,9 @@ async def generate_recommendation(user: User, db: AsyncSession) -> Recommendatio
         payload["weekly_plan"] = add_strength_to_plan(
             payload["weekly_plan"], phase=phase, approach_key=approach
         )
+        # Keep next_workout in sync — weekly_plan[0] may now be a strength day
+        if payload["weekly_plan"]:
+            payload["next_workout"] = payload["weekly_plan"][0]
 
     return Recommendation(
         user_id=user.id,

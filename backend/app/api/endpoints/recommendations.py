@@ -43,10 +43,28 @@ async def get_recommendation(
     rec = result.scalar_one_or_none()
 
     from datetime import datetime, timedelta, timezone
+    from sqlalchemy import select as _sel
+    from app.models.user import AthleteProfile
     if rec:
         age = datetime.now(timezone.utc) - rec.generated_at.replace(tzinfo=timezone.utc)
         if age < timedelta(hours=6):
-            return _rec_out(rec)
+            # Invalidate cache if profile has a strength approach but cached payload
+            # has no strength sessions (generated before strength feature was added).
+            prof_res = await db.execute(
+                _sel(AthleteProfile).where(AthleteProfile.user_id == current_user.id)
+            )
+            prof = prof_res.scalar_one_or_none()
+            approach = (prof.strength_approach or "friel") if prof else "friel"
+            if approach != "none":
+                plan = rec.payload.get("weekly_plan", [])
+                has_strength = any(
+                    w.get("is_strength") or w.get("strength_addon") or w.get("gtg_practice")
+                    for w in plan
+                )
+                if not has_strength:
+                    rec = None  # force regeneration
+            if rec:
+                return _rec_out(rec)
 
     # Generate fresh recommendation
     rec = await generate_recommendation(current_user, db)

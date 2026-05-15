@@ -253,8 +253,7 @@ function InsightGrid({ insights }: { insights: CoachInsight[] }) {
 }
 
 function WorkoutCard({ plan, highlight, recId }: { plan: WorkoutPlan & { is_strength?: boolean; strength_session?: any; strength_addon?: any; gtg_practice?: any }; highlight: boolean; recId?: string }) {
-  if (plan.is_strength) return <StrengthCard plan={plan} highlight={highlight} />;
-
+  // Hooks must be called unconditionally before any early return
   const [feedbackSent, setFeedbackSent] = useState<"accepted" | "rejected" | null>(null);
 
   const feedback = useMutation({
@@ -266,6 +265,8 @@ function WorkoutCard({ plan, highlight, recId }: { plan: WorkoutPlan & { is_stre
     },
     onError: () => toast.error("Couldn't save feedback"),
   });
+
+  if (plan.is_strength) return <StrengthCard plan={plan} highlight={highlight} />;
 
   const labelDate = new Date();
   labelDate.setDate(labelDate.getDate() + plan.day_offset);
