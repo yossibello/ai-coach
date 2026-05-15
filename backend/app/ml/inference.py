@@ -98,6 +98,38 @@ def _load_model() -> CyclingTransformer | None:
         return None
 
 
+def _inject_strength(
+    payload: dict,
+    profile: "AthleteProfile | None",
+    days_to_event: int | None = None,
+) -> None:
+    """Inject strength sessions into payload['weekly_plan'] and sync next_workout."""
+    from app.strength.scheduler import add_strength_to_plan
+    from app.ml.cold_start import get_periodization_phase
+
+    approach = (profile.strength_approach or "friel") if profile else "friel"
+    if approach == "none":
+        return
+
+    if days_to_event is not None:
+        weeks_out = max(0, days_to_event // 7)
+    elif profile and profile.goal_event_date:
+        ged = profile.goal_event_date
+        now = datetime.now(timezone.utc)
+        if ged.tzinfo is None:
+            ged = ged.replace(tzinfo=timezone.utc)
+        weeks_out = max(0, (ged - now).days // 7)
+    else:
+        weeks_out = 52
+
+    phase = get_periodization_phase(weeks_out)
+    payload["weekly_plan"] = add_strength_to_plan(
+        payload["weekly_plan"], phase=phase, approach_key=approach
+    )
+    if payload["weekly_plan"]:
+        payload["next_workout"] = payload["weekly_plan"][0]
+
+
 async def generate_recommendation(user: User, db: AsyncSession) -> Recommendation:
     """Main entry: decide cold-start vs transformer, return Recommendation ORM object."""
     # Load profile
@@ -283,26 +315,7 @@ async def generate_recommendation(user: User, db: AsyncSession) -> Recommendatio
     if next_notes or plan_notes:
         payload.setdefault("safety_notes", []).extend(next_notes + plan_notes)
 
-    # ── Strength session injection ───────────────────────────────────────────
-    approach = (profile.strength_approach or "friel") if profile else "friel"
-    if approach != "none":
-        from app.strength.scheduler import add_strength_to_plan
-        from app.ml.cold_start import get_periodization_phase
-        if profile and profile.goal_event_date:
-            ged = profile.goal_event_date
-            now = datetime.now(timezone.utc)
-            if ged.tzinfo is None:
-                ged = ged.replace(tzinfo=timezone.utc)
-            weeks_out = max(0, (ged - now).days // 7)
-        else:
-            weeks_out = 52
-        phase = get_periodization_phase(weeks_out)
-        payload["weekly_plan"] = add_strength_to_plan(
-            payload["weekly_plan"], phase=phase, approach_key=approach
-        )
-        # Keep next_workout in sync — weekly_plan[0] may now be a strength day
-        if payload["weekly_plan"]:
-            payload["next_workout"] = payload["weekly_plan"][0]
+    _inject_strength(payload, profile)
 
     return Recommendation(
         user_id=user.id,
@@ -845,6 +858,8 @@ async def generate_multi_horizon_recommendation(
                 })
             cs["weekly_plan"] = weekly_plan
             cs["next_workout"] = weekly_plan[0]
+            # Inject strength sessions into cold-start horizon plans
+            _inject_strength(cs, profile, wte * 7)
             cs["horizon"] = h_label
             cs["horizon_days"] = h_days
             cs["horizon_label"] = _horizon_label(h_label, h_days)
@@ -895,6 +910,8 @@ async def generate_multi_horizon_recommendation(
             horizon_override_days=dte,
         )
         payload["weekly_plan"] = rolled
+        # Inject strength sessions into each horizon's weekly plan
+        _inject_strength(payload, profile, dte)
 
         payload["horizon"]       = label
         payload["horizon_days"]  = dte
