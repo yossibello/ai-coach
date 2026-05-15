@@ -1,6 +1,6 @@
 "use client";
 
-import { useQuery, useMutation } from "@tanstack/react-query";
+import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { profileAPI } from "@/lib/api";
 import { useState, useEffect } from "react";
 import type { AthleteProfile, GoalType } from "@/types";
@@ -41,6 +41,7 @@ export default function ProfilePage() {
     queryFn: () => profileAPI.get(),
   });
 
+  const qc = useQueryClient();
   const [form, setForm] = useState<Partial<AthleteProfile>>({});
 
   useEffect(() => {
@@ -49,7 +50,13 @@ export default function ProfilePage() {
 
   const save = useMutation({
     mutationFn: () => profileAPI.update(form),
-    onSuccess: () => toast.success("Profile saved"),
+    onSuccess: () => {
+      toast.success("Profile saved");
+      // Profile changes affect training plan — bust coach caches so next visit regenerates
+      qc.invalidateQueries({ queryKey: ["coach-recommendation"] });
+      qc.invalidateQueries({ queryKey: ["coach-multi-horizon"] });
+      qc.invalidateQueries({ queryKey: ["coach-macrocycle"] });
+    },
     onError: () => toast.error("Failed to save profile"),
   });
 

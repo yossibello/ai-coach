@@ -27,7 +27,7 @@ export default function CoachPage() {
   const { data: multi, isLoading: multiLoading } = useQuery({
     queryKey: ["coach-multi-horizon"],
     queryFn: () => coachAPI.getMultiHorizon(),
-    staleTime: 5 * 60 * 1000, // 5 min
+    staleTime: 0, // always refetch — plan changes with every profile/training update
   });
 
   // Macrocycle: reverse-periodization plan. 404 silently if no goal_event_date.
