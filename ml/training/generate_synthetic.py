@@ -361,6 +361,155 @@ def _apply_event_bias(weekly_wts: list[str], event_type: str | None, phase: str)
     return [bias.get(w, w) for w in weekly_wts]
 
 
+# ── Horizon probe sequences ───────────────────────────────────────────────────
+# Goal: teach the model that the same FITNESS STATE should yield DIFFERENT
+# recommendations depending on how far the event is.  This is the Friel/Coggan
+# periodization principle that the normal simulation can't provide alone —
+# because in the natural trajectory an athlete in base always has high DTE and
+# an athlete in taper always has low DTE, so the model conflates fitness state
+# with DTE and can't separate them.
+#
+# Solution: append a structured "probe season" after each real simulation.
+# The probe season contains 4 phase blocks (one per Friel phase), each 3 weeks
+# long.  Within a block ALL rides have the same fixed days_to_event AND
+# phase-appropriate workout types.  The dataset then samples windows FROM
+# WITHIN these blocks — so both the history context AND the look-ahead target
+# are phase-consistent.  The model sees the contrastive signal it needs.
+#
+# Friel/Coggan phase boundaries (weeks_to_event → phase):
+#   > 20 weeks (140d+)  → base
+#   8–20 weeks (56–140d) → build
+#   3–8 weeks  (21–56d)  → peak
+#   0–3 weeks  (0–21d)   → taper
+
+# Representative DTE per phase (mid-phase, clearly inside each zone)
+_PROBE_PHASE_CONFIG: list[tuple[str, int]] = [
+    ("base",  182),   # 26 weeks out — deep aerobic base
+    ("build",  84),   # 12 weeks out — progressive intensity build
+    ("peak",   35),   # 5 weeks out  — quality sharpening
+    ("taper",  10),   # 10 days out  — race-week freshening
+]
+
+# Each philosophy's most representative workout mix per phase.
+# Two workouts per phase so the model sees the characteristic PAIR, not just
+# one type.  Friel/Coggan values guide COGGAN_FRIEL; the others follow their
+# own sport-science logic.
+_PROBE_SCHEDULES: dict[str, dict[str, list[str]]] = {
+    COGGAN_FRIEL: {
+        "base":          ["endurance", "endurance", "tempo",     "long_ride",  "easy"],
+        "build":         ["sweetspot", "endurance", "sweetspot", "threshold",  "long_ride"],
+        "peak":          ["threshold", "endurance", "vo2max",    "easy",       "threshold"],
+        "taper":         ["easy",      "threshold", "recovery",  "easy",       "endurance"],
+        "recovery_week": ["recovery",  "easy",      "recovery",  "easy"],
+    },
+    POGACAR_Z2: {
+        "base":          ["endurance", "endurance", "sprint",    "long_ride",  "easy"],
+        "build":         ["endurance", "vo2max",    "long_ride", "sprint",     "endurance"],
+        "peak":          ["vo2max",    "endurance", "sprint",    "threshold",  "easy"],
+        "taper":         ["easy",      "sprint",    "recovery",  "easy",       "endurance"],
+        "recovery_week": ["recovery",  "easy",      "recovery",  "easy"],
+    },
+    POLARIZED: {
+        "base":          ["endurance", "endurance", "vo2max",    "long_ride",  "easy"],
+        "build":         ["endurance", "vo2max",    "endurance", "vo2max",     "long_ride"],
+        "peak":          ["vo2max",    "endurance", "threshold", "easy",       "vo2max"],
+        "taper":         ["easy",      "vo2max",    "recovery",  "easy",       "endurance"],
+        "recovery_week": ["recovery",  "easy",      "recovery",  "easy"],
+    },
+}
+
+
+def _simulate_probe_season(
+    athlete: "Athlete",
+    rng: np.random.Generator,
+    season_start: datetime,
+    ctl: float,
+    atl: float,
+) -> list[dict]:
+    """Append a structured horizon-probe season after the real simulation.
+
+    Produces 4 phase blocks × 3 weeks × (up to training_days) rides.
+    Within each block every ride has days_to_event fixed to the mid-phase value
+    so BOTH the history window AND the look-ahead target window (used by
+    CyclingDataset) are phase-consistent.  CTL/ATL evolve realistically within
+    each block but are not carried across blocks (each block starts from the
+    same snapshot) to avoid one phase's fatigue contaminating the next.
+    """
+    rows: list[dict] = []
+    sched = _PROBE_SCHEDULES.get(athlete.philosophy, _PROBE_SCHEDULES[COGGAN_FRIEL])
+
+    for phase_name, probe_dte in _PROBE_PHASE_CONFIG:
+        # Each block starts from the same fitness snapshot — the point is to
+        # show the model that the SAME CTL/ATL can be associated with different
+        # training depending solely on days_to_event.
+        block_ctl = ctl
+        block_atl = atl
+        block_date = season_start
+        days_since_last = 2
+        yesterday_workout: str | None = None
+        yesterday_tss = 0.0
+        days_since_hard = 3
+
+        phase_options = sched.get(phase_name, sched["base"])
+
+        for week_num in range(3):    # 3 weeks per phase block
+            # Every 3rd week is a recovery week (Friel: 3+1 pattern)
+            if week_num == 2:
+                weekly_wts = list(sched.get("recovery_week", ["easy", "recovery", "easy", "easy"]))
+            else:
+                weekly_wts = list(rng.choice(phase_options)
+                                  if isinstance(phase_options[0], list)
+                                  else phase_options)
+
+            if len(weekly_wts) > athlete.training_days:
+                weekly_wts = weekly_wts[: athlete.training_days]
+
+            spread_days = sorted(
+                rng.choice(7, size=len(weekly_wts), replace=False).tolist()
+            )
+
+            for i, wt in enumerate(weekly_wts):
+                ride_date = block_date + timedelta(days=int(spread_days[i]))
+
+                hrv_today, rhr_today, sleep_score, body_battery = _simulate_health_for_day(
+                    athlete, rng,
+                    yesterday_workout=yesterday_workout,
+                    yesterday_tss=yesterday_tss,
+                    days_since_hard=days_since_hard,
+                    atl=block_atl, ctl=block_ctl,
+                )
+
+                row, tss = _simulate_ride(
+                    wt, athlete, rng, ride_date, days_since_last,
+                    block_ctl, block_atl,
+                    hrv_today=hrv_today,
+                    rhr_today=rhr_today,
+                    sleep_score=sleep_score,
+                    body_battery=body_battery,
+                )
+
+                # Override days_to_event: this is the core of the probe season.
+                row["days_to_event"] = float(probe_dte)
+
+                block_ctl = block_ctl + (2 / 43) * (tss - block_ctl)
+                block_atl = block_atl + (2 / 8)  * (tss - block_atl)
+
+                days_since_last = 1
+                yesterday_workout = wt
+                yesterday_tss = tss
+                days_since_hard = 0 if wt in ("threshold", "vo2max", "race", "sprint", "sweetspot") else days_since_hard + 1
+
+                rows.append(row)
+
+            block_date += timedelta(days=7)
+
+        # Gap between phase blocks so the dataset never samples a window that
+        # straddles two probe phases.
+        season_start = block_date + timedelta(days=21)
+
+    return rows
+
+
 # ── HRV / RHR / sleep / body-battery simulation ───────────────────────────────
 # Implements an autonomic-recovery model based on:
 #   • Plews & Buchheit (2013) — Ln(RMSSD) drops with sympathetic dominance and
@@ -870,6 +1019,16 @@ def _simulate_athlete(
         _adapt_anaerobic_factor(athlete, week_tss_by_type, tsb, rng)
 
         date += timedelta(days=7)
+
+    # Horizon probe season (20 % of athletes): append a structured 4-phase
+    # block after the real simulation.  Each block has consistent days_to_event
+    # + phase-appropriate workouts so the dataset samples fully phase-coherent
+    # windows.  This gives the model the contrastive signal it needs to learn
+    # Friel periodization: same fitness state, different DTE → different plan.
+    if rng.random() < 0.35:
+        rows.extend(
+            _simulate_probe_season(athlete, rng, date, ctl, atl)
+        )
 
     return rows
 

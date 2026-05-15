@@ -1,3 +1,5 @@
+import withPWA from "next-pwa";
+
 /** @type {import('next').NextConfig} */
 const nextConfig = {
   experimental: {
@@ -10,13 +12,21 @@ const nextConfig = {
     ],
   },
   async rewrites() {
+    // BACKEND_URL is server-side only (no NEXT_PUBLIC_ prefix).
+    // Inside Docker it's http://backend:8000; outside Docker it falls back to localhost.
+    const backendUrl = process.env.BACKEND_URL ?? "http://localhost:8000";
     return [
       {
         source: "/api/v1/:path*",
-        destination: `${process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000"}/api/v1/:path*`,
+        destination: `${backendUrl}/api/v1/:path*`,
       },
     ];
   },
 };
 
-export default nextConfig;
+export default withPWA({
+  dest: "public",
+  register: true,
+  skipWaiting: true,
+  disable: process.env.NODE_ENV === "development",
+})(nextConfig);

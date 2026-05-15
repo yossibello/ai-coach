@@ -30,8 +30,13 @@ export function formatDate(iso: string): string {
 }
 
 export function relativeDate(iso: string): string {
-  const diff = Date.now() - new Date(iso).getTime();
-  const days = Math.floor(diff / 86_400_000);
+  const act = new Date(iso);
+  const today = new Date();
+  // Compare calendar dates so "2 days ago" matches what Strava shows regardless
+  // of the exact time of day the activity was recorded.
+  const actDay  = new Date(act.getFullYear(),   act.getMonth(),   act.getDate());
+  const todayDay = new Date(today.getFullYear(), today.getMonth(), today.getDate());
+  const days = Math.round((todayDay.getTime() - actDay.getTime()) / 86_400_000);
   if (days === 0) return "Today";
   if (days === 1) return "Yesterday";
   if (days < 7) return `${days} days ago`;

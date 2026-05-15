@@ -260,6 +260,47 @@ def apply_health_safety(
     return w, notes
 
 
+def apply_drift_safety(
+    next_workout: dict[str, Any] | None,
+    *,
+    drift_state: str | None,
+    drift_pct: float | None,
+) -> tuple[dict[str, Any] | None, list[str]]:
+    """Gate intensity based on aerobic decoupling state.
+
+    Stable  (<5%):  no change — caller may trigger progression event.
+    Decoupled (5–10%): block threshold/VO2max; cap at sweetspot.
+    Stressed (>10%): force easy/recovery and reduce duration.
+    """
+    if next_workout is None or drift_state is None or drift_pct is None:
+        return next_workout, []
+
+    notes: list[str] = []
+    w = dict(next_workout)
+    wtype = (w.get("workout_type") or "endurance").lower()
+
+    if drift_state == "stressed" and wtype not in {"recovery", "easy"}:
+        notes.append(
+            f"HR drift {drift_pct:.1f}% (stressed) — downgraded {wtype} → easy. "
+            "Reduce ride duration and verify HRV before next hard session."
+        )
+        w["workout_type"] = "easy"
+        w["duration_minutes"] = min(int(w.get("duration_minutes") or 60), 60)
+        w["target_tss"] = min(float(w.get("target_tss") or 50), 50)
+
+    elif drift_state == "decoupled" and wtype in HIGH_INTENSITY_TYPES:
+        notes.append(
+            f"HR drift {drift_pct:.1f}% (decoupled) — downgraded {wtype} → sweetspot. "
+            "Consolidate aerobic base before adding intensity."
+        )
+        w["workout_type"] = "sweetspot"
+        w["target_tss"] = min(float(w.get("target_tss") or 100), 120)
+
+    if notes:
+        w.setdefault("safety_notes", []).extend(notes)
+    return w, notes
+
+
 def check_weekly_ramp_safe(
     last_week_tss: float,
     proposed_week_tss: float,

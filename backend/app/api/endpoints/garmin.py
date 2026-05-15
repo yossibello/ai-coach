@@ -81,7 +81,8 @@ async def connect(
             current_user, body.username, body.password, db
         )
     except Exception as exc:
-        log.warning("garmin connect failed for %s: %s", current_user.email, exc)
+        import traceback as _tb
+        print(f"[GARMIN CONNECT ERROR] user={current_user.email}: {exc}\n{_tb.format_exc()}", flush=True)
         raise HTTPException(status_code=400, detail=f"Garmin login failed: {exc}")
     return {"status": "connected", "username": body.username}
 

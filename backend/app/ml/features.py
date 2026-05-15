@@ -72,6 +72,11 @@ def encode_activity(
         "rhr_delta": rhr_delta,
         "sleep_score": sleep_score,
         "body_battery": body_battery,
+        # Power curve (W/kg from stream extraction; 0 if no power meter)
+        "pc_5s_wkg":   act.pc_5s_wkg   or 0.0,
+        "pc_1min_wkg": act.pc_1min_wkg  or 0.0,
+        "pc_5min_wkg": act.pc_5min_wkg  or 0.0,
+        "pc_20min_wkg": act.pc_20min_wkg or 0.0,
     }
     return encode_activity_row(
         raw, ftp=ftp, max_hr_athlete=max_hr, resting_hr=resting_hr,
@@ -99,6 +104,7 @@ def encode_profile(profile: AthleteProfile | None, current_ftp: float = 200) -> 
         "cycling_experience_years": p.cycling_experience_years if p else None,
         "primary_goal": p.primary_goal if p else None,
         "days_to_event": days_to_event,
+        "training_days_per_week": p.training_days_per_week if p else None,
     }
     return encode_profile_row(raw)
 

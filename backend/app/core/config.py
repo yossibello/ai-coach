@@ -23,6 +23,12 @@ class Settings(BaseSettings):
     STRAVA_WEBHOOK_VERIFY_TOKEN: str = "aicoach_webhook"
     STRAVA_REDIRECT_URI: str = "http://localhost:3000/api/strava/callback"
 
+    # Fitbit OAuth
+    FITBIT_CLIENT_ID: str = ""
+    FITBIT_CLIENT_SECRET: str = ""
+    FITBIT_REDIRECT_URI: str = "http://localhost:8000/api/v1/fitbit/callback"
+    FRONTEND_URL: str = "http://localhost:3000"
+
     # OpenAI (optional text explanations)
     OPENAI_API_KEY: str = ""
 

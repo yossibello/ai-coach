@@ -155,11 +155,10 @@ export default function ActivitiesPage() {
             onClick={handleRefresh}
             disabled={refreshing}
             title="Reload from server"
-            className="flex items-center gap-1.5 px-3 py-2 bg-surface border border-surface-border
-                       hover:border-brand-500/50 text-slate-300 text-sm rounded-lg transition disabled:opacity-50"
+            className="p-2 bg-surface border border-surface-border hover:border-brand-500/50
+                       text-slate-300 rounded-lg transition disabled:opacity-50"
           >
             <RefreshCw className={`w-4 h-4 ${refreshing ? "animate-spin" : ""}`} />
-            Refresh
           </button>
           <button
             onClick={handleSyncAll}
@@ -169,12 +168,13 @@ export default function ActivitiesPage() {
                        text-white text-sm font-medium rounded-lg transition disabled:opacity-50"
           >
             <RefreshCw className={`w-4 h-4 ${isSyncing ? "animate-spin" : ""}`} />
-            {syncLabel}
+            <span className="hidden sm:inline">{syncLabel}</span>
+            <span className="sm:hidden">Sync</span>
           </button>
           <Link
             href="/upload"
-            className="bg-brand-500 hover:bg-brand-600 text-white px-4 py-2 rounded-lg
-                       text-sm font-medium transition"
+            className="bg-surface border border-surface-border hover:border-brand-500/50
+                       text-slate-300 px-3 py-2 rounded-lg text-sm font-medium transition"
           >
             + Upload
           </Link>
@@ -208,40 +208,40 @@ export default function ActivitiesPage() {
           <table className="w-full text-sm">
             <thead className="border-b border-surface-border">
               <tr className="text-gray-400">
-                <th className="text-left px-6 py-3 font-medium">Activity</th>
-                <th className="text-right px-4 py-3 font-medium">Duration</th>
-                <th className="text-right px-4 py-3 font-medium">Distance</th>
-                <th className="text-right px-4 py-3 font-medium">Power</th>
-                <th className="text-right px-4 py-3 font-medium">TSS</th>
-                <th className="text-left px-4 py-3 font-medium">Type</th>
-                <th className="px-4 py-3" />
+                <th className="text-left px-4 py-3 font-medium">Activity</th>
+                <th className="text-right px-3 py-3 font-medium">Dur</th>
+                <th className="hidden sm:table-cell text-right px-3 py-3 font-medium">Dist</th>
+                <th className="hidden sm:table-cell text-right px-3 py-3 font-medium">Power</th>
+                <th className="text-right px-3 py-3 font-medium">TSS</th>
+                <th className="text-left px-3 py-3 font-medium">Type</th>
+                <th className="px-3 py-3" />
               </tr>
             </thead>
             <tbody className="divide-y divide-surface-border">
               {data.items.map((act) => (
                 <tr key={act.id} className="hover:bg-surface-border/20 transition">
-                  <td className="px-6 py-4">
-                    <div className="font-medium text-white">{act.name}</div>
+                  <td className="px-4 py-3">
+                    <div className="font-medium text-white truncate max-w-[140px] sm:max-w-none">{act.name}</div>
                     <div className="text-gray-500 text-xs mt-0.5">
                       {relativeDate(act.date)} · {act.source}
                     </div>
                   </td>
-                  <td className="px-4 py-4 text-right text-gray-300">
+                  <td className="px-3 py-3 text-right text-gray-300 whitespace-nowrap">
                     {act.duration_seconds ? formatDuration(act.duration_seconds) : "—"}
                   </td>
-                  <td className="px-4 py-4 text-right text-gray-300">
+                  <td className="hidden sm:table-cell px-3 py-3 text-right text-gray-300 whitespace-nowrap">
                     {act.distance_meters ? formatDistance(act.distance_meters) : "—"}
                   </td>
-                  <td className="px-4 py-4 text-right text-gray-300">
+                  <td className="hidden sm:table-cell px-3 py-3 text-right text-gray-300 whitespace-nowrap">
                     {act.avg_power ? `${Math.round(act.avg_power)}W` : "—"}
                   </td>
-                  <td className="px-4 py-4 text-right text-gray-300">
+                  <td className="px-3 py-3 text-right text-gray-300 whitespace-nowrap">
                     {act.tss ? Math.round(act.tss) : "—"}
                   </td>
-                  <td className="px-4 py-4">
+                  <td className="px-3 py-3">
                     {act.workout_type ? (
                       <span
-                        className={`px-2 py-0.5 rounded-full text-xs font-medium ${
+                        className={`px-2 py-0.5 rounded-full text-xs font-medium whitespace-nowrap ${
                           WORKOUT_TYPE_COLORS[act.workout_type] ?? "bg-gray-800 text-gray-300"
                         }`}
                       >
@@ -249,7 +249,7 @@ export default function ActivitiesPage() {
                       </span>
                     ) : null}
                   </td>
-                  <td className="px-4 py-4 text-right">
+                  <td className="px-3 py-3 text-right">
                     <button
                       onClick={() => {
                         if (confirm("Delete this activity?")) deleteMutation.mutate(act.id);

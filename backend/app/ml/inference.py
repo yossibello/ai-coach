@@ -146,6 +146,51 @@ def _inject_strength(
         payload["next_workout"] = payload["weekly_plan"][0]
 
 
+def _differentiate_horizon(payload: dict, label: str, days_to_event: int) -> None:
+    """
+    Post-process the week-1 plan to make each horizon genuinely distinct.
+    The transformer tends to output the same 'best week' regardless of horizon
+    because days_to_event doesn't move the model output strongly enough.
+    We apply goal-consistent biases:
+
+      short  (7d)  → max this week: harder sessions, +12% TSS
+      medium (28d) → progressive build: standard types, +5% TSS
+      event far (>60d) → aerobic base: dial back intensity, -12% TSS
+      event near (≤60d) → race sharpening: more threshold, +8% TSS
+    """
+    plan = payload.get("weekly_plan", [])
+    if not plan:
+        return
+
+    if label == "short":
+        type_upgrades = {"endurance": "threshold", "easy": "endurance"}
+        tss_scale = 1.12
+    elif label == "medium":
+        type_upgrades = {}
+        tss_scale = 1.05
+    elif days_to_event > 60:
+        # Long base phase — build aerobic foundation
+        type_upgrades = {"vo2max": "threshold", "threshold": "endurance"}
+        tss_scale = 0.88
+    else:
+        # Near event — race-specific sharpening
+        type_upgrades = {"endurance": "threshold"}
+        tss_scale = 1.08
+
+    for day in plan:
+        wt = day.get("workout_type", "rest")
+        if wt in ("rest", "strength"):
+            continue
+        new_wt = type_upgrades.get(wt, wt)
+        if new_wt != wt:
+            day["workout_type"] = new_wt
+        day["target_tss"] = max(10, int((day.get("target_tss") or 0) * tss_scale))
+        day["duration_minutes"] = max(15, int((day.get("duration_minutes") or 0) * tss_scale))
+
+    if plan:
+        payload["next_workout"] = plan[0]
+
+
 async def generate_recommendation(user: User, db: AsyncSession) -> Recommendation:
     """Main entry: decide cold-start vs transformer, return Recommendation ORM object."""
     # Load profile

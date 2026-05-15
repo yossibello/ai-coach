@@ -625,6 +625,18 @@ function MacrocycleCard({
 
   const horizonSubtitle = horizonPayload?.horizon_label;
 
+  // Derive dominant workout focus for week 1 from the horizon plan
+  const week1HorizonFocus: string | null = (() => {
+    if (!horizonPayload?.weekly_plan?.length) return null;
+    const counts: Record<string, number> = {};
+    for (const day of horizonPayload.weekly_plan) {
+      const wt = day.workout_type ?? "rest";
+      if (wt !== "rest") counts[wt] = (counts[wt] ?? 0) + 1;
+    }
+    const top = Object.entries(counts).sort((a, b) => b[1] - a[1])[0];
+    return top ? top[0] : null;
+  })();
+
   // CTL stat labels change per horizon
   const ctlLabel =
     activeHorizon === "short"  ? "Current CTL" :
@@ -696,6 +708,7 @@ function MacrocycleCard({
                 <MacrocycleWeekCell
                   key={w.week_index}
                   week={w}
+                  focusOverride={w.week_index === 0 && week1HorizonFocus ? week1HorizonFocus : undefined}
                   isInScope={w.week_index < inScopeWeeks}
                   dimmed={w.week_index >= inScopeWeeks && inScopeWeeks < macro.weeks.length}
                 />
@@ -719,16 +732,19 @@ function MacrocycleCard({
 
 function MacrocycleWeekCell({
   week,
+  focusOverride,
   isInScope = true,
   dimmed = false,
 }: {
   week: MacrocycleWeek;
+  focusOverride?: string;
   isInScope?: boolean;
   dimmed?: boolean;
 }) {
   const date = new Date(week.week_start);
   const label = date.toLocaleDateString(undefined, { month: "short", day: "numeric" });
   const phaseStyle = PHASE_STYLES[week.phase] ?? PHASE_STYLES.build;
+  const displayPhase = focusOverride ? focusOverride.replace(/_/g, " ") : week.phase.replace("_", " ");
 
   return (
     <div
@@ -743,7 +759,7 @@ function MacrocycleWeekCell({
     >
       <div className="text-[10px] opacity-70">W{week.week_index + 1} · {label}</div>
       <div className="text-xs font-semibold capitalize mt-0.5">
-        {week.phase.replace("_", " ")}
+        {displayPhase}
       </div>
       <div className="text-base font-bold text-white mt-1">{week.target_weekly_tss}</div>
       <div className="text-[10px] opacity-70">TSS · CTL {week.target_ctl_end.toFixed(0)}</div>

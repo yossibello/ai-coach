@@ -85,6 +85,7 @@ NORM_BOUNDS: dict[str, tuple[float, float]] = {
     "resting_hr":        (30.0, 90.0),
     "experience_years":  (0.0, 30.0),
     "days_to_event":     (0.0, 730.0),
+    "training_days":     (1.0, 7.0),
 }
 
 
@@ -376,6 +377,7 @@ def encode_profile_dataframe(df) -> np.ndarray:
         _norm_array(df["experience_years"].fillna(3).to_numpy(dtype=np.float32), "experience_years"),
         goal_norm,
         _norm_array(df["days_to_event"].fillna(365).to_numpy(dtype=np.float32), "days_to_event"),
+        _norm_array(df["training_days"].fillna(5).to_numpy(dtype=np.float32), "training_days"),
     ]
     out = np.stack(cols, axis=1).astype(np.float32)
     assert out.shape[1] == PROFILE_DIM
@@ -418,6 +420,8 @@ def encode_profile_row(profile: Mapping) -> np.ndarray:
         goal_idx / max(len(GOAL_TYPES) - 1, 1),
         n01(profile.get("days_to_event") if profile.get("days_to_event") is not None else 365,
             "days_to_event"),
+        n01(profile.get("training_days_per_week") or profile.get("training_days") or 5,
+            "training_days"),
     ]
     arr = np.asarray(vec, dtype=np.float32)
     assert arr.shape[0] == PROFILE_DIM

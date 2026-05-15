@@ -15,6 +15,12 @@ import {
   CheckCircle2,
   ChevronDown,
   ChevronUp,
+  AlertTriangle,
+  Info,
+  Moon,
+  Heart,
+  Battery,
+  Activity,
 } from "lucide-react";
 
 type Method = "credentials" | "oauth";
@@ -56,7 +62,7 @@ export default function GarminConnect() {
       // Auto-start sync
       sync.mutate();
     },
-    onError: () => toast.error("Connection failed — check your credentials"),
+    onError: (err: any) => toast.error(err?.response?.data?.detail || "Connection failed — check your credentials"),
   });
 
   // ── Disconnect ─────────────────────────────────────────────────────────────
@@ -200,6 +206,48 @@ export default function GarminConnect() {
           </>
         ) : (
           <>
+            {/* What Garmin adds to coaching */}
+            <div className="rounded-xl border border-slate-700/60 bg-slate-800/40 p-4 space-y-3">
+              <div className="flex items-center gap-2 text-xs font-semibold text-slate-300 uppercase tracking-wide">
+                <Info className="w-3.5 h-3.5 text-brand-400" />
+                Why connect Garmin?
+              </div>
+              <div className="grid grid-cols-2 gap-2">
+                {[
+                  { icon: <Moon className="w-3.5 h-3.5" />, label: "Sleep score", desc: "Recovery quality" },
+                  { icon: <Heart className="w-3.5 h-3.5" />, label: "HRV + RHR", desc: "Readiness baseline" },
+                  { icon: <Battery className="w-3.5 h-3.5" />, label: "Body Battery", desc: "Daily energy level" },
+                  { icon: <Activity className="w-3.5 h-3.5" />, label: "Activities", desc: "Power & HR data" },
+                ].map(({ icon, label, desc }) => (
+                  <div key={label} className="flex items-start gap-2 text-xs">
+                    <span className="text-brand-400 mt-0.5">{icon}</span>
+                    <div>
+                      <div className="text-slate-200 font-medium">{label}</div>
+                      <div className="text-slate-500">{desc}</div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+              <p className="text-xs text-slate-500 leading-relaxed">
+                HRV, sleep, and body battery are fed directly into the AI model as inputs for each ride —
+                so recommendations adapt to how recovered you actually are, not just your training load.
+              </p>
+            </div>
+
+            {/* Limitation notice */}
+            <div className="rounded-xl border border-amber-500/20 bg-amber-500/5 px-4 py-3 space-y-1.5">
+              <div className="flex items-center gap-2 text-xs font-semibold text-amber-400">
+                <AlertTriangle className="w-3.5 h-3.5 flex-shrink-0" />
+                Before you connect
+              </div>
+              <ul className="text-xs text-slate-400 space-y-1 leading-relaxed list-disc list-inside">
+                <li>Uses Garmin's <strong className="text-slate-300">unofficial API</strong> — not an official integration</li>
+                <li><strong className="text-slate-300">2-factor authentication must be disabled</strong> on your Garmin account, otherwise login will fail</li>
+                <li>Garmin occasionally blocks this method — if it fails, try again in a few minutes</li>
+                <li>Official OAuth support is coming — we are applying for Garmin partner access</li>
+              </ul>
+            </div>
+
             {/* Method picker */}
             <div className="grid grid-cols-2 gap-3">
               <MethodCard

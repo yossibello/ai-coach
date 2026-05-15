@@ -78,9 +78,9 @@ PROFILE_FEATURES = [
     "age_norm", "weight_norm", "height_norm", "sex_bin",
     "ftp_norm", "max_hr_norm", "resting_hr_norm",
     "experience_norm", "goal_type_norm",
-    "days_to_event_norm",
+    "days_to_event_norm", "training_days_norm",
 ]
-PROFILE_DIM = len(PROFILE_FEATURES)  # 10
+PROFILE_DIM = len(PROFILE_FEATURES)  # 11
 
 INPUT_DIM = ACTIVITY_DIM + PROFILE_DIM  # total token dim
 

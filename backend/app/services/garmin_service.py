@@ -48,8 +48,8 @@ DEDUP_DURATION_REL = 0.25           # ±25% relative
 
 # ─── Dev path: garminconnect ──────────────────────────────────────────────────
 
-def _new_garmin_client(username: str, password: str):
-    """Lazy import so the dependency is optional at runtime."""
+def _build_garmin_client(username: str, password: str, tokenstore: str | None = None):
+    """Lazy import + login. Pass tokenstore to skip username/password re-auth."""
     try:
         from garminconnect import Garmin
     except ImportError as exc:  # pragma: no cover
@@ -58,10 +58,11 @@ def _new_garmin_client(username: str, password: str):
         ) from exc
     client = Garmin(username, password)
     try:
-        client.login()
+        client.login(tokenstore)  # None → fresh login; string → restore session
     except Exception as exc:
+        if tokenstore:
+            raise  # let caller handle token expiry and retry with password
         msg = str(exc)
-        # Translate common garminconnect errors into user-friendly messages
         if "TOO_MANY_REQUESTS" in msg or "429" in msg or "TooManyRequests" in type(exc).__name__:
             raise RuntimeError(
                 "Garmin Connect rate-limited this account. Wait 15–30 minutes then retry."
@@ -78,18 +79,15 @@ def _new_garmin_client(username: str, password: str):
     return client
 
 
-async def _login_async(username: str, password: str):
-    return await asyncio.to_thread(_new_garmin_client, username, password)
-
-
 async def connect_with_credentials(
     user: User, username: str, password: str, db: AsyncSession
 ) -> None:
     """Validate credentials with Garmin Connect and persist (encrypted)."""
-    client = await _login_async(username, password)
+    client = await asyncio.to_thread(_build_garmin_client, username, password)
     user.garmin_username = username
     user.garmin_password_enc = encrypt_str(password)
     user.garmin_user_id = str(getattr(client, "display_name", "") or username)
+    user.garmin_token_store = encrypt_str(client.garth.dumps())
     db.add(user)
     await db.flush()
 
@@ -100,17 +98,35 @@ async def disconnect(user: User, db: AsyncSession) -> None:
     user.garmin_user_id = None
     user.garmin_access_token = None
     user.garmin_refresh_token = None
+    user.garmin_token_store = None
     db.add(user)
     await db.flush()
 
 
-async def _client_for(user: User):
+async def _client_for(user: User, db: AsyncSession):
+    """Return authenticated Garmin client, preferring cached tokens over password re-auth."""
     if not user.garmin_username or not user.garmin_password_enc:
         raise RuntimeError("Garmin Connect credentials not configured for user")
+    username = user.garmin_username
     pwd = decrypt_str(user.garmin_password_enc)
     if pwd is None:
         raise RuntimeError("Cannot decrypt Garmin credentials (SECRET_KEY changed?)")
-    return await _login_async(user.garmin_username, pwd)
+
+    # Try cached token store first — avoids triggering rate limits
+    if user.garmin_token_store:
+        tokenstore = decrypt_str(user.garmin_token_store)
+        try:
+            client = await asyncio.to_thread(_build_garmin_client, username, pwd, tokenstore)
+            return client
+        except Exception:
+            log.info("Garmin cached token expired for %s, falling back to password login", username)
+
+    # Password login + save fresh tokens
+    client = await asyncio.to_thread(_build_garmin_client, username, pwd)
+    user.garmin_token_store = encrypt_str(client.garth.dumps())
+    db.add(user)
+    await db.flush()
+    return client
 
 
 # ─── Prod path: OAuth shell (placeholders) ────────────────────────────────────
@@ -341,7 +357,7 @@ async def sync_garmin(
         "health_days_updated": 0,
         "errors": 0,
     }
-    client = await _client_for(user)
+    client = await _client_for(user, db)
 
     # ── activities ────────────────────────────────────────────────────────────
     activities = await _fetch_activities(client, days)
@@ -431,6 +447,13 @@ async def sync_garmin(
         except Exception as exc:  # pragma: no cover
             log.exception("garmin wellness import failed for %s: %s", day, exc)
             stats["errors"] += 1
+
+    # Persist any token refresh that garth performed during the session
+    try:
+        user.garmin_token_store = encrypt_str(client.garth.dumps())
+        db.add(user)
+    except Exception:
+        pass  # non-fatal: worst case next sync re-authenticates with password
 
     await db.flush()
     return stats

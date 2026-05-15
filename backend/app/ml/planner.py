@@ -81,24 +81,20 @@ def desired_weekly_tss(
     """Compute target weekly TSS given current fitness, freshness, and phase.
 
     The starting point is "maintain current CTL" (which requires 7·CTL TSS
-    per week, since CTL is itself a TSS-per-day EMA). We then add the
-    phase-dependent safe ramp, and clamp the increase to max_increase_pct
-    so we never jump more than 30% over last week's load.
+    per week, since CTL is a daily EMA that counts rest days as TSS=0).
+    We then add the phase-dependent safe ramp.
     """
     maintain = max(7.0 * ctl, 100.0)  # never plan less than 100 TSS/week
     ramp = _RAMP_BY_PHASE.get(phase, 0.0)
     target = maintain + 7.0 * ramp
 
-    # If athlete is fresh (TSB > +10), we can safely push the upper bound a bit.
     if tsb > 10:
         target *= 1.05
-    # If athlete is fatigued (TSB < -15), pull back regardless of phase.
     if tsb < -15:
         target *= 0.85
     if tsb < -25:
         target *= 0.7
 
-    # Cap absolute increase vs current maintenance level.
     return float(min(target, maintain * (1.0 + max_increase_pct)))
 
 
@@ -111,38 +107,44 @@ def solve_week(
     phase: str,
     hrv_z: float | None = None,
 ) -> tuple[list[float], list[str]]:
-    """Compute per-day TSS for a planned 7-workout week.
+    """Compute per-day TSS for a planned training week.
 
     Args:
-        workouts: list of workout-type names, length 7 (one per day; use
-            "rest"/"recovery" for off days).
+        workouts: list of workout-type names for training days only (length
+            1–7). Rest days are NOT included — they are appended as TSS=0
+            when projecting the PMC so the CTL/ATL decay on off-days is
+            correctly modelled.
         ctl, atl, tsb: current PMC values.
         phase: periodization phase name.
         hrv_z: latest HRV z-score vs baseline; if < -1.0, hard sessions get
             an extra 30% throttle (Plews & Buchheit 2013).
 
     Returns:
-        (daily_tss, safety_notes)
+        (daily_tss, safety_notes)  — same length as workouts.
     """
     notes: list[str] = []
     n = len(workouts)
     if n == 0:
         return [], notes
 
+    rest_days = max(0, 7 - n)  # days with TSS=0 that follow training days
+
     # 1. Baseline TSS per day from the workout library.
     base = [_baseline_tss(w) for w in workouts]
 
-    # 2. Compute desired weekly total and the scale factor.
+    # 2. Desired weekly total is still 7·CTL-based — CTL is a daily EMA that
+    #    counts all 7 days; rest days contribute TSS=0 and naturally decay it.
+    #    Concentrating the same weekly budget into fewer training days means
+    #    each session is proportionally harder, which is correct.
     target = desired_weekly_tss(ctl, tsb, phase)
     base_total = sum(base) or 1.0
     scale = target / base_total
-    # Don't over-shrink (preserves intensity feel) or over-grow (preserves
-    # recovery between hard days).
     scale = max(0.6, min(scale, 1.4))
     if abs(scale - 1.0) > 0.05:
         notes.append(
             f"Weekly TSS scaled by {scale:.2f}× to hit target "
-            f"{target:.0f} TSS (phase={phase}, current CTL={ctl:.0f})."
+            f"{target:.0f} TSS over {n} training days "
+            f"(phase={phase}, CTL={ctl:.0f})."
         )
     daily = [b * scale for b in base]
 
@@ -155,19 +157,22 @@ def solve_week(
             f"Hard sessions throttled 30% due to suppressed HRV (z={hrv_z:.2f})."
         )
 
-    # 4. TSB safety projection — iteratively shrink hardest day if end-of-week
-    #    TSB falls below the cliff.
+    # 4. TSB safety projection — pad with rest-day zeros so the PMC sees the
+    #    full 7-day week including off-days (where ATL/CTL decay matters).
+    def _project(d: list[float]) -> tuple[float, float, float]:
+        return _project_pmc(ctl, atl, d + [0.0] * rest_days)
+
     for _ in range(5):
-        end_ctl, end_atl, end_tsb = _project_pmc(ctl, atl, daily)
+        _, _, end_tsb = _project(daily)
         if end_tsb >= _TSB_MIN:
             break
-        # Find the hardest scheduled day and trim 15% off it.
         hard_indices = [i for i, w in enumerate(workouts) if w in _HARD_TYPES]
         if not hard_indices:
             break
         worst = max(hard_indices, key=lambda i: daily[i])
         daily[worst] *= 0.85
-    end_ctl, end_atl, end_tsb = _project_pmc(ctl, atl, daily)
+
+    end_ctl, end_atl, end_tsb = _project(daily)
     if end_tsb < _TSB_MIN:
         notes.append(
             f"Even after throttling, projected end-of-week TSB={end_tsb:.0f} "
