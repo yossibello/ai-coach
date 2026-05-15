@@ -39,15 +39,17 @@ def _day_before_hard(plan: list[dict], idx: int) -> bool:
 def _candidate_days(plan: list[dict], approach_key: str) -> list[int]:
     """
     Return day indices eligible for a strength session, ordered by preference:
-      1. Rest days (no cycling at all)
-      2. Recovery / easy ride days
-    Hard days and the day before a hard day are excluded.
-    GTG can co-exist with easy days so it uses a looser filter.
+      1. Rest days (no cycling at all) — replaced with pure strength day
+      2. Easy / recovery / endurance — strength added as addon
+      3. Any other non-hard day (sweetspot, tempo, long_ride) — last resort addon
+    Hard days and the day before a hard day are always excluded.
+    GTG can co-exist with any non-hard day.
     """
     is_gtg = approach_key == "grease_the_groove"
 
-    preferred: list[int] = []
-    acceptable: list[int] = []
+    preferred: list[int] = []   # rest days
+    acceptable: list[int] = []  # easy/endurance
+    last_resort: list[int] = [] # any other non-hard day
 
     for i, day in enumerate(plan):
         wt = day.get("workout_type", "rest")
@@ -59,11 +61,11 @@ def _candidate_days(plan: list[dict], approach_key: str) -> list[int]:
             preferred.append(i)
         elif _is_easy_or_rest(day):
             acceptable.append(i)
-        elif is_gtg:
-            # GTG can go on any non-hard day
-            acceptable.append(i)
+        else:
+            # sweetspot, tempo, long_ride, etc. — not ideal but better than nothing
+            last_resort.append(i)
 
-    return preferred + acceptable
+    return preferred + acceptable + last_resort
 
 
 def _strength_workout_entry(
