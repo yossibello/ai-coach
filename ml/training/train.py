@@ -428,7 +428,5 @@ if __name__ == "__main__":
                         help="Use torch.compile for extra GPU speed (PyTorch 2.0+)")
     parser.add_argument("--no-amp",     action="store_true",
                         help="Disable Automatic Mixed Precision even on GPU")
-    parser.add_argument("--steps-per-epoch", type=int, default=None,
-                        help="Cap training steps per epoch (useful for huge datasets). Default: all batches.")
     args = parser.parse_args()
     train(args)
