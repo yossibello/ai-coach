@@ -108,13 +108,15 @@ class FrielApproach:
     )
 
     def sessions_per_week(self, phase: str) -> int:
-        return {"base_build": 2, "build": 2, "peak": 1, "recovery_week": 0}.get(phase, 1)
+        # Friel CTB: AA early base = 3×, late base/MS = 2×, SM peak = 1×
+        return {"base_build": 3, "build": 2, "peak": 1, "recovery_week": 0}.get(phase, 1)
 
     def get_sessions(self, phase: str) -> list[StrengthSession]:
         if phase == "recovery_week":
             return []
         if phase == "base_build":
-            return [self._aa_session_a(), self._aa_session_b()]
+            # Friel: 3×/week in AA — A, B, A rotation
+            return [self._aa_session_a(), self._aa_session_b(), self._aa_session_a()]
         if phase == "build":
             return [self._ms_session_a(), self._ms_session_b()]
         # peak / default → maintenance
@@ -266,32 +268,6 @@ class MinimumDoseApproach:
         return 0 if phase == "recovery_week" else 2
 
     def get_sessions(self, phase: str) -> list[StrengthSession]:
-        if phase == "recovery_week":
-            return []
-        session = StrengthSession(
-            name="The 5-Pattern Session",
-            phase_label="Minimum Dose",
-            duration_minutes=30,
-            notes=(
-                "Hit all 5 patterns every time. Weight selection: you should finish "
-                "each set feeling like you could do 2-3 more reps. Never go to failure. "
-                "If you only have 20 minutes, do 2 sets instead of 3."
-            ),
-            exercises=[
-                ExerciseSlot(KB_SWING,        sets=3, reps="10",     rest_sec=60,
-                             weight_guidance="Moderate KB. Explosive snap at the top."),
-                ExerciseSlot(GOBLET_SQUAT,    sets=3, reps="8",      rest_sec=60,
-                             weight_guidance="Moderate KB or DB. Chest tall, deep squat."),
-                ExerciseSlot(PUSH_UP,         sets=3, reps="10",     rest_sec=45,
-                             weight_guidance="Bodyweight. Full range. Elevate hands if needed."),
-                ExerciseSlot(BAND_PULL_APART, sets=3, reps="15",     rest_sec=30,
-                             weight_guidance="Light-medium band."),
-                ExerciseSlot(DEAD_BUG,        sets=3, reps="8 each", rest_sec=30, weight_guidance=""),
-            ],
-        )
-        return [session, session]  # same session both days
-
-    def get_sessions(self, phase: str) -> list[StrengthSession]:  # type: ignore[no-redef]
         if phase == "recovery_week":
             return []
         session = self._the_session()
