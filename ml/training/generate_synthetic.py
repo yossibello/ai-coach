@@ -1105,26 +1105,47 @@ def generate(n_athletes: int, n_weeks: int | None, seed: int, output: str,
             )
 
     print(f"\nMerging {len(tmp_files)} chunk files…")
-    df = pd.concat([pd.read_parquet(f) for f in tmp_files], ignore_index=True)
-    # Clean up temp files
+
+    # Stream-merge: write one chunk at a time so we never hold 14M rows in RAM.
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    os.makedirs(os.path.dirname(output) or ".", exist_ok=True)
+
+    writer = None
+    total_rows = 0
     for f in tmp_files:
+        table = pq.read_table(f)
+        if writer is None:
+            writer = pq.ParquetWriter(output, table.schema, compression="snappy")
+        writer.write_table(table)
+        total_rows += len(table)
+        del table
         try:
             os.remove(f)
         except OSError:
             pass
+
+    if writer:
+        writer.close()
     try:
         os.rmdir(tmp_dir)
     except OSError:
         pass
 
-    print(f"Total rides simulated: {len(df):,}")
-    df = df.sort_values(["athlete_id", "date"]).reset_index(drop=True)
+    print(f"Total rides simulated: {total_rows:,}")
 
-    os.makedirs(os.path.dirname(output) or ".", exist_ok=True)
-    df.to_parquet(output, index=False)
+    # Sort in one pass using pyarrow (avoids a second full pandas DataFrame).
+    print("Sorting by athlete_id + date…")
+    full = pq.read_table(output)
+    full = full.sort_by([("athlete_id", "ascending"), ("date", "ascending")])
+    pq.write_table(full, output, compression="snappy")
 
     print(f"\nSaved → {output}")
     print(f"File size: {os.path.getsize(output) / 1e6:.1f} MB")
+
+    df = full.to_pandas()
+    del full
     print(f"Columns ({len(df.columns)}): {list(df.columns)}")
     print(f"FTP range: {df['ftp'].min():.0f} – {df['ftp'].max():.0f} W")
     print(f"\nWorkout type distribution:\n{df['workout_type'].value_counts().to_string()}")
