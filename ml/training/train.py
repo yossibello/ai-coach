@@ -150,10 +150,18 @@ def train(args):
         # Handle both raw state_dict and full checkpoint dict (current format).
         if isinstance(ckpt, dict) and "state_dict" in ckpt:
             model.load_state_dict(ckpt["state_dict"])
-            start_epoch = ckpt.get("metrics", {}).get("epoch", 0)
+            saved_epoch = ckpt.get("metrics", {}).get("epoch", 0)
+            # Resume only if mid-run (saved_epoch < total epochs).
+            # If saved_epoch >= args.epochs it's a fine-tune: use weights only,
+            # reset epoch counter so the loop and scheduler start fresh.
+            if saved_epoch < args.epochs:
+                start_epoch = saved_epoch
+                print(f"Resuming from checkpoint: {args.checkpoint} (epoch {start_epoch} → {args.epochs})")
+            else:
+                print(f"Fine-tune mode: loaded weights from epoch {saved_epoch}, starting fresh at epoch 1")
         else:
             model.load_state_dict(ckpt)
-        print(f"Resumed from checkpoint: {args.checkpoint} (epoch {start_epoch})")
+            print(f"Loaded checkpoint: {args.checkpoint}")
 
     if n_gpus > 1:
         # Force cuBLAS handle creation on every GPU before DataParallel spawns
