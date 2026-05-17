@@ -94,6 +94,24 @@ def train(args):
     del df
 
     train_ds = CyclingDataset(train_df, seq_len=args.seq_len, already_sorted=True)
+
+    # Compute inverse-frequency class weights for workout-type CE loss.
+    # Without this, the model collapses to predicting "endurance" (~35% of
+    # all rides), since the 11-class distribution is highly skewed.
+    from collections import Counter as _Counter
+    from app.ml.norm import WORKOUT_TYPES as _WT
+    _wt_counts  = _Counter(int(v) for v in train_ds.wt_idx)
+    _total      = sum(_wt_counts.values())
+    _n          = len(_WT)
+    _freq       = [max(_wt_counts.get(i, 1), 1) / _total for i in range(_n)]
+    # Inverse-frequency, then normalise so mean = 1 (keeps overall loss scale).
+    # Cap at 8× to prevent extreme weights from dominating on very rare classes.
+    _raw_w      = [min(1.0 / (f * _n), 8.0) for f in _freq]
+    _mean_w     = sum(_raw_w) / _n
+    _wt_class_w = [w / _mean_w for w in _raw_w]
+    print(f"Workout class distribution: {dict(zip(_WT, [round(_wt_counts.get(i,0)/_total*100,1) for i in range(_n)]))}")
+    print(f"Workout class weights (mean-norm): {dict(zip(_WT, [round(w, 2) for w in _wt_class_w]))}")
+
     del train_df
     val_ds   = CyclingDataset(val_df, seq_len=args.seq_len, already_sorted=True)
     del val_df
@@ -202,7 +220,10 @@ def train(args):
         for _ in range(start_epoch):
             scheduler.step()
     scaler     = GradScaler(device=device.type, enabled=device.type == "cuda" and not args.no_amp)
-    ce_loss       = nn.CrossEntropyLoss(label_smoothing=0.1)
+    ce_loss       = nn.CrossEntropyLoss(
+        label_smoothing=0.1,
+        weight=torch.tensor(_wt_class_w, dtype=torch.float32, device=device),
+    )
     mse_loss      = nn.MSELoss()
     # delta=0.05: transition from L2→L1 at 5% — appropriate for fractional targets
     huber_loss    = nn.HuberLoss(delta=0.05)
