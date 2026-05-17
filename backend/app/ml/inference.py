@@ -4,6 +4,7 @@ builds the full recommendation, and analyzes individual activities.
 """
 from __future__ import annotations
 
+import math
 import os
 from datetime import datetime, timedelta, timezone
 
@@ -39,6 +40,7 @@ HORIZON_DAYS = {
 WORKOUT_TYPE_NAMES = [
     "recovery", "easy", "endurance", "tempo", "sweetspot",
     "threshold", "vo2max", "sprint", "race", "long_ride",
+    "strength_endurance",   # low-cadence force work for climbing events
 ]
 
 # Global model singleton (loaded once)
@@ -225,6 +227,19 @@ async def generate_recommendation(user: User, db: AsyncSession) -> Recommendatio
     atl = latest_metric.atl if latest_metric else 0.0
     tsb = latest_metric.tsb if latest_metric else 0.0
 
+    # Forward-decay stale fitness metrics to today (rest weeks / gaps in sync).
+    # CTL τ=42d, ATL τ=7d — without decay, a pre-rest-week snapshot makes the
+    # athlete look perpetually fatigued even after several days of easy riding.
+    if latest_metric and latest_metric.date:
+        import math as _math
+        _md = latest_metric.date
+        metric_date = _md.replace(tzinfo=None) if _md.tzinfo is not None else _md
+        days_stale = max(0, (datetime.utcnow() - metric_date).days)
+        if days_stale > 0:
+            ctl = ctl * _math.exp(-days_stale / 42)
+            atl = atl * _math.exp(-days_stale / 7)
+            tsb = ctl - atl
+
     # Load health metrics (HRV / RHR / sleep / body battery) for the same window
     # as activities + a 30-day prefix so HRV z-scores have a baseline.
     health_cutoff = datetime.utcnow() - timedelta(days=120)
@@ -266,9 +281,30 @@ async def generate_recommendation(user: User, db: AsyncSession) -> Recommendatio
 
     model = _load_model()
 
+    # Seed CTL/ATL from the FitnessMetric at the oldest loaded activity's date
+    # so the running EMA inside _transformer_recommendation is correct even when
+    # the user has thousands of rides and we only loaded the last MODEL_SEQ_LEN.
+    seed_ctl, seed_atl = 0.0, 0.0
+    if activities:
+        oldest_date = activities[0].date
+        seed_result = await db.execute(
+            sa_select(FitnessMetric)
+            .where(
+                FitnessMetric.user_id == user.id,
+                FitnessMetric.date <= oldest_date,
+            )
+            .order_by(desc(FitnessMetric.date))
+            .limit(1)
+        )
+        seed_metric = seed_result.scalar_one_or_none()
+        if seed_metric:
+            seed_ctl = seed_metric.ctl
+            seed_atl = seed_metric.atl
+
     if total_activities >= COLD_START_THRESHOLD and model is not None:
         payload = _transformer_recommendation(model, activities, profile, ctl, atl, tsb,
-                                              health_by_date=health_by_date)
+                                              health_by_date=health_by_date,
+                                              seed_ctl=seed_ctl, seed_atl=seed_atl)
     else:
         payload = build_cold_start_recommendation(
             profile, ctl, atl, tsb, recent_types, total_activities
@@ -364,14 +400,16 @@ async def generate_recommendation(user: User, db: AsyncSession) -> Recommendatio
         ctl=ctl,
         tsb=tsb,
     )
-    # Keep weekly_plan[0] in sync with next_workout (safety guard may have
-    # returned a copy, so day_offset and other fields can diverge).
-    # Then renumber the rest of the plan sequentially after next_workout's day.
+    # Keep weekly_plan[0] in sync with next_workout.
+    # If today's guard shifted next_workout to day_offset=1, shift ALL plan
+    # offsets by +1 to preserve Friel recovery gaps (e.g. [0,2,4,5,6] → [1,3,5,6,7]).
+    # Sequential renumbering would destroy those gaps.
     if safe_next is not None and safe_plan:
+        shift = safe_next.get("day_offset", 0)
+        if shift > 0:
+            for w in safe_plan:
+                w["day_offset"] = w.get("day_offset", 0) + shift
         safe_plan[0] = safe_next
-        start = safe_next.get("day_offset", 0)
-        for i, w in enumerate(safe_plan[1:], start=1):
-            w["day_offset"] = start + i
     payload["weekly_plan"] = safe_plan
     if next_notes or plan_notes:
         payload.setdefault("safety_notes", []).extend(next_notes + plan_notes)
@@ -421,6 +459,8 @@ def _transformer_recommendation(
     horizon_override_days: int | None = None,
     *,
     health_by_date: dict | None = None,
+    seed_ctl: float = 0.0,
+    seed_atl: float = 0.0,
 ) -> dict:
     """Run the transformer and convert outputs to recommendation payload.
 
@@ -447,7 +487,9 @@ def _transformer_recommendation(
     # Running CTL/ATL — pass PRE-update state into the encoder to match the
     # synthetic training distribution (which stores ctl/atl observed AT the
     # moment of the ride, before the ride's own TSS is added to the EMA).
-    _ctl, _atl = 0.0, 0.0
+    # seed_ctl/seed_atl come from FitnessMetric at the oldest loaded activity's
+    # date so users with 2000+ rides get correct CTL context, not a cold start.
+    _ctl, _atl = seed_ctl, seed_atl
     prev_date = None
 
     for act in activities:
@@ -672,13 +714,21 @@ def _transformer_recommendation(
     # fires more strongly, suppress undertraining entirely (and vice versa).
     # This corrects for the independent-sigmoid risk head used in v2 — the
     # next retrain will replace it with a softmax head.
+    #
+    # Rule-based sanity gate: the model's risk head is trained on synthetic
+    # data and can misfire on patterns it hasn't seen (rest week → single Z2
+    # ride, low-CTL athlete with sparse HR/power data, etc.).  We only let the
+    # model's signal through when the objective training-load numbers agree:
+    #   • overtraining: only when TSB is genuinely negative (< -20)
+    #   • injury:       only when ATL has spiked ≥40% above CTL baseline
+    # Undertraining has no gate — false positives there are harmless.
     risks = []
     over_score  = float(risks_scores[0])
     under_score = float(risks_scores[1])
     inj_score   = float(risks_scores[2])
 
     # Only fire the stronger of over/under; suppress the weaker one.
-    if over_score > 0.6 and over_score >= under_score:
+    if over_score > 0.6 and over_score >= under_score and tsb < -20:
         risks.append({"type": "overtraining",
                       "severity": "high" if over_score > 0.8 else "medium",
                       "message": "Model detected overtraining patterns. Consider a recovery day."})
@@ -686,7 +736,7 @@ def _transformer_recommendation(
         risks.append({"type": "undertraining", "severity": "low",
                       "message": "Training load is below your potential. Room to add volume safely."})
 
-    if inj_score > 0.6:
+    if inj_score > 0.6 and ctl > 10 and atl / ctl > 1.4:
         risks.append({"type": "injury", "severity": "medium",
                       "message": "Training pattern resembles overuse sequences. Monitor for soreness."})
 
@@ -780,9 +830,15 @@ def _zone_comment(pct_ftp: float) -> str:
 
 def _apply_today_ride_guard(payload: dict, activities: list) -> dict:
     """
-    Shift next_workout and weekly_plan[0] to tomorrow if the user already did a
-    significant ride today. Mirrors the guard in generate_recommendation so that
-    multi-horizon payloads stay in sync with the standard recommendation.
+    Shift the entire weekly plan forward by one day if the user already did a
+    significant ride today.
+
+    Shifts every day_offset by +1 (preserving the recovery gaps from
+    _trim_pattern_to_days) rather than renumbering sequentially, which was
+    collapsing the gaps and creating duplicate 'Tomorrow' cards.
+
+    Must be called AFTER _rollout_week so the offsets being shifted are the
+    final ones — _rollout_week hardcodes day0 to offset 0.
     """
     def _naive(d):
         return d.replace(tzinfo=None) if d and d.tzinfo else d
@@ -792,27 +848,30 @@ def _apply_today_ride_guard(payload: dict, activities: list) -> dict:
     today_tss = sum((a.tss or 0.0) for a in today_acts)
     today_dur_min = sum((a.duration_seconds or 0) for a in today_acts) / 60.0
 
-    nw = payload.get("next_workout")
-    if today_acts and nw is not None and (today_tss >= 30 or today_dur_min >= 45):
-        nw = dict(nw)
-        nw["day_offset"] = 1
+    if not today_acts or (today_tss < 30 and today_dur_min < 45):
+        return payload
+
+    # Shift every workout in the plan forward by one day.
+    weekly_plan = [dict(w) for w in payload.get("weekly_plan", [])]
+    for w in weekly_plan:
+        w["day_offset"] = w.get("day_offset", 0) + 1
+    payload["weekly_plan"] = weekly_plan
+
+    # Annotate next_workout (which is weekly_plan[0]) with the reason.
+    nw = dict(payload["next_workout"]) if payload.get("next_workout") else None
+    if nw is not None:
+        nw["day_offset"] = weekly_plan[0]["day_offset"] if weekly_plan else 1
         nw["already_rode_today"] = True
         nw["today_tss"] = round(today_tss, 1)
         nw["today_duration_minutes"] = int(today_dur_min)
-        existing_rationale = nw.get("rationale", "")
         nw["rationale"] = (
             f"You've already ridden today ({int(today_dur_min)} min, "
             f"{int(today_tss)} TSS). Suggested workout moved to tomorrow. "
-            f"{existing_rationale}"
+            f"{nw.get('rationale', '')}"
         ).strip()
         payload["next_workout"] = nw
-
-        weekly_plan = [dict(w) for w in payload.get("weekly_plan", [])]
         if weekly_plan:
             weekly_plan[0] = nw
-            for i, w in enumerate(weekly_plan[1:], start=1):
-                w["day_offset"] = 1 + i
-            payload["weekly_plan"] = weekly_plan
 
     return payload
 
@@ -879,7 +938,26 @@ async def generate_multi_horizon_recommendation(
     )
     total_activities = count_result.scalar_one()
 
+    # Seed CTL/ATL from the FitnessMetric at the oldest loaded activity's date
+    seed_ctl, seed_atl = 0.0, 0.0
+    if activities:
+        oldest_date = activities[0].date
+        seed_result = await db.execute(
+            sa_select(FitnessMetric)
+            .where(
+                FitnessMetric.user_id == user.id,
+                FitnessMetric.date <= oldest_date,
+            )
+            .order_by(desc(FitnessMetric.date))
+            .limit(1)
+        )
+        seed_metric = seed_result.scalar_one_or_none()
+        if seed_metric:
+            seed_ctl = seed_metric.ctl
+            seed_atl = seed_metric.atl
+
     model = _load_model()
+
 
     # If we don't have a model or enough history, generate cold-start recs for
     # all 3 horizons using the phase-appropriate schedule for each.
@@ -956,9 +1034,8 @@ async def generate_multi_horizon_recommendation(
             model, activities, profile, ctl, atl, tsb,
             horizon_override_days=dte,
             health_by_date=health_by_date,
+            seed_ctl=seed_ctl, seed_atl=seed_atl,
         )
-        _apply_today_ride_guard(payload, activities)
-
         # Replace the static WEEKLY_PATTERNS template with autoregressive rollout:
         # the model simulates days 1-6 based on accumulated fatigue from day-0,
         # then prunes to training_days. This produces Friel-consistent gaps
@@ -969,8 +1046,12 @@ async def generate_multi_horizon_recommendation(
             health_by_date=health_by_date,
             training_days=training_days,
             horizon_override_days=dte,
+            horizon_label=label,
         )
         payload["weekly_plan"] = rolled
+        # Guard must run AFTER rollout: _rollout_week hardcodes day0 to offset 0,
+        # so any shift applied before rollout gets overwritten.
+        _apply_today_ride_guard(payload, activities)
         # Inject strength sessions into each horizon's weekly plan
         _inject_strength(payload, profile, dte, tsb=tsb)
 
@@ -1010,6 +1091,7 @@ def _rollout_week(
     health_by_date: dict | None,
     training_days: int,
     horizon_override_days: int | None,
+    horizon_label: str | None = None,
 ) -> list[dict]:
     """Build a weekly plan anchored on the transformer's day-0 prediction.
 
@@ -1020,6 +1102,10 @@ def _rollout_week(
 
     The pattern is trimmed to exactly training_days sessions using
     Friel/Coggan recovery-gap spacing (_trim_pattern_to_days).
+
+    horizon_label drives the phase directly so short/medium/event produce
+    genuinely different templates — the weeks-to-event calculation collapses
+    both medium and event into "peak" which makes them identical.
     """
     from app.ml.cold_start import (
         WORKOUT_LIBRARY as WL,
@@ -1034,8 +1120,27 @@ def _rollout_week(
         (profile.goal_event_date.replace(tzinfo=timezone.utc) - datetime.now(timezone.utc)).days
         if profile and getattr(profile, "goal_event_date", None) else 90
     )
-    weeks_for_plan = max(0, dte_for_plan // 7)
-    phase_for_plan = get_periodization_phase(weeks_for_plan)
+
+    # Map horizon label → phase directly to prevent medium and event from
+    # collapsing to the same WEEKLY_PATTERNS bucket via week-count rounding.
+    # short  → "peak"       (sharpen: best quality work to peak THIS week)
+    # medium → "build"      (progressive 4-week development)
+    # event  → real Friel periodization based on actual days-to-event
+    if horizon_label == "short":
+        phase_for_plan = "peak"
+    elif horizon_label == "medium":
+        phase_for_plan = "build"
+    else:
+        # Event horizon: bucket by DTE so it's always distinct from medium(28d→build).
+        # >56d (>8w): aerobic base building — endurance/sweetspot/long_ride dominant
+        # 29-56d (4-8w): race-prep build — threshold/VO2max increasing
+        # ≤28d (<4w): sharpening — similar to peak
+        if dte_for_plan > 56:
+            phase_for_plan = "base_build"
+        elif dte_for_plan > 28:
+            phase_for_plan = "build"
+        else:
+            phase_for_plan = "peak"
 
     phase_pattern = list(WEEKLY_PATTERNS.get(phase_for_plan, WEEKLY_PATTERNS["build"]))
     day0_type = day0_workout.get("workout_type", phase_pattern[0])

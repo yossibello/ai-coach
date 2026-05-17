@@ -145,6 +145,7 @@ def train(args):
         model = torch.compile(model)
 
     start_epoch = 0
+    _resume_optimizer_state = None  # loaded below, applied after optimizer is created
     if args.checkpoint and os.path.exists(args.checkpoint):
         ckpt = torch.load(args.checkpoint, map_location=device, weights_only=False)
         # Handle both raw state_dict and full checkpoint dict (current format).
@@ -156,6 +157,7 @@ def train(args):
             # reset epoch counter so the loop and scheduler start fresh.
             if saved_epoch < args.epochs:
                 start_epoch = saved_epoch
+                _resume_optimizer_state = ckpt.get("optimizer_state")
                 print(f"Resuming from checkpoint: {args.checkpoint} (epoch {start_epoch} → {args.epochs})")
             else:
                 print(f"Fine-tune mode: loaded weights from epoch {saved_epoch}, starting fresh at epoch 1")
@@ -181,11 +183,24 @@ def train(args):
 
     # ── Optimizer / Scheduler / Losses ────────────────────────────────────
     optimizer  = AdamW(model.parameters(), lr=args.lr, weight_decay=1e-4)
+    if _resume_optimizer_state is not None:
+        try:
+            optimizer.load_state_dict(_resume_optimizer_state)
+            print("  Optimizer state restored from checkpoint (AdamW momentum preserved).")
+        except Exception as e:
+            print(f"  Warning: could not restore optimizer state ({e}); starting optimizer fresh.")
     scheduler  = CosineAnnealingLR(optimizer, T_max=args.epochs, eta_min=1e-6)
-    # Fast-forward scheduler to match the resumed epoch without needing
-    # saved optimizer state (last_epoch kwarg requires initial_lr in param groups).
-    for _ in range(start_epoch):
-        scheduler.step()
+    # Fast-forward scheduler to the resumed epoch. A dummy zero-grad step
+    # registers initial_lr in param groups so the fast-forward doesn't trigger
+    # PyTorch's "called before optimizer.step()" warning.
+    if start_epoch > 0:
+        if _resume_optimizer_state is None:
+            # Only do the dummy step when optimizer state wasn't loaded;
+            # if state was loaded, initial_lr is already in the param groups.
+            optimizer.zero_grad()
+            optimizer.step()
+        for _ in range(start_epoch):
+            scheduler.step()
     scaler     = GradScaler(device=device.type, enabled=device.type == "cuda" and not args.no_amp)
     ce_loss       = nn.CrossEntropyLoss(label_smoothing=0.1)
     mse_loss      = nn.MSELoss()
@@ -383,6 +398,7 @@ def train(args):
                 raw_model = raw_model.module
             ckpt = {
                 "state_dict": raw_model.state_dict(),
+                "optimizer_state": optimizer.state_dict(),
                 "config": {
                     "input_dim": raw_model.input_proj[0].in_features,
                     "d_model": d_model,
