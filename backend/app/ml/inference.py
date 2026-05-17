@@ -719,8 +719,9 @@ def _transformer_recommendation(
     # data and can misfire on patterns it hasn't seen (rest week → single Z2
     # ride, low-CTL athlete with sparse HR/power data, etc.).  We only let the
     # model's signal through when the objective training-load numbers agree:
-    #   • overtraining: only when TSB is genuinely negative (< -20)
-    #   • injury:       only when ATL has spiked ≥40% above CTL baseline
+    #   • overtraining: only when TSB is genuinely negative (< -25)
+    #   • injury:       ATL spiked ≥40% above CTL AND absolute ATL > 50
+    #                   (prevents false positives on first ride back from rest)
     # Undertraining has no gate — false positives there are harmless.
     risks = []
     over_score  = float(risks_scores[0])
@@ -728,7 +729,7 @@ def _transformer_recommendation(
     inj_score   = float(risks_scores[2])
 
     # Only fire the stronger of over/under; suppress the weaker one.
-    if over_score > 0.6 and over_score >= under_score and tsb < -20:
+    if over_score > 0.6 and over_score >= under_score and tsb < -25:
         risks.append({"type": "overtraining",
                       "severity": "high" if over_score > 0.8 else "medium",
                       "message": "Model detected overtraining patterns. Consider a recovery day."})
@@ -736,7 +737,7 @@ def _transformer_recommendation(
         risks.append({"type": "undertraining", "severity": "low",
                       "message": "Training load is below your potential. Room to add volume safely."})
 
-    if inj_score > 0.6 and ctl > 10 and atl / ctl > 1.4:
+    if inj_score > 0.6 and ctl > 10 and atl > 50 and atl / ctl > 1.4:
         risks.append({"type": "injury", "severity": "medium",
                       "message": "Training pattern resembles overuse sequences. Monitor for soreness."})
 

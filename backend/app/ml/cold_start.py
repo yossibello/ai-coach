@@ -379,7 +379,7 @@ def _build_risks(
             "message": f"TSB is {round(tsb)} — very deep fatigue. "
                        "Take 2-3 easy days before any quality work.",
         })
-    elif tsb < -20:
+    elif tsb < -25:
         risks.append({
             "type": "overtraining",
             "severity": "medium",
@@ -388,9 +388,10 @@ def _build_risks(
         })
 
     # Rapid ramping: ATL >40% above CTL means recent load has spiked vs base.
-    # Only meaningful when CTL is established (>10) — below that, any single
-    # ride skews the ratio on a near-zero baseline.
-    if ctl > 10 and atl / ctl > 1.4:
+    # Requires CTL established (>10) AND absolute ATL above 50 — this prevents
+    # false positives when returning from a rest week (CTL decays, then a single
+    # ride pushes the ratio above 1.4 even though absolute load is low).
+    if ctl > 10 and atl > 50 and atl / ctl > 1.4:
         risks.append({
             "type": "injury",
             "severity": "medium",
