@@ -181,8 +181,11 @@ def train(args):
 
     # ── Optimizer / Scheduler / Losses ────────────────────────────────────
     optimizer  = AdamW(model.parameters(), lr=args.lr, weight_decay=1e-4)
-    scheduler  = CosineAnnealingLR(optimizer, T_max=args.epochs, eta_min=1e-6,
-                                   last_epoch=start_epoch - 1)
+    scheduler  = CosineAnnealingLR(optimizer, T_max=args.epochs, eta_min=1e-6)
+    # Fast-forward scheduler to match the resumed epoch without needing
+    # saved optimizer state (last_epoch kwarg requires initial_lr in param groups).
+    for _ in range(start_epoch):
+        scheduler.step()
     scaler     = GradScaler(device=device.type, enabled=device.type == "cuda" and not args.no_amp)
     ce_loss       = nn.CrossEntropyLoss(label_smoothing=0.1)
     mse_loss      = nn.MSELoss()
