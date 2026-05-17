@@ -55,7 +55,8 @@ POGACAR_Z2   = "pogacar_z2"
 POLARIZED    = "polarized"
 
 WT = ["recovery", "easy", "endurance", "tempo", "sweetspot",
-      "threshold", "vo2max", "sprint", "race", "long_ride"]
+      "threshold", "vo2max", "sprint", "race", "long_ride",
+      "strength_endurance"]
 
 
 # ── Per-workout-type physiological templates ──────────────────────────────────
@@ -100,21 +101,41 @@ TEMPLATES = {
                       dur_h=(3.5, 7.0),
                       zones=[0.02, 0.70, 0.23, 0.04, 0.01, 0, 0],
                       rpe=(4, 7), hr_drift=(4, 18), vi=(1.04, 1.13)),
+    # Low-cadence force work: sweetspot power at 50-65 rpm.
+    # Builds the muscular endurance required for sustained Alpine climbs.
+    # Key distinguishers: low cadence (explicit in _simulate_ride),
+    # higher VI (more torque variation per pedal stroke), lower HR than
+    # equivalent sweetspot effort (Coyle et al. 1983: low cadence = lower HR
+    # at same absolute power due to longer inter-contraction recovery).
+    "strength_endurance": dict(if_range=(0.84, 0.96), np_bonus=0.07,
+                               dur_h=(1.0, 2.0),
+                               zones=[0, 0.04, 0.18, 0.34, 0.38, 0.06, 0],
+                               rpe=(6, 8), hr_drift=(2, 8), vi=(1.06, 1.20)),
 }
 
 
 # ── Weekly schedule templates per philosophy × phase ──────────────────────────
 SCHEDULES = {
     COGGAN_FRIEL: {
+        # Friel Base phase (Training Bible ch.7): Force reps are Priority 1 in
+        # every base week — they build the neuromuscular foundation before
+        # threshold/sweetspot work is added. "Muscular Force" (MusFo) = big
+        # gear, 40-60 rpm, 1-3 min seated reps on a climb. Captured here as
+        # strength_endurance (low-cadence sweetspot).  AE (aerobic endurance)
+        # and the long ride complete the week.
         "base": [
-            ["endurance", "endurance", "easy", "long_ride", "recovery"],
-            ["endurance", "endurance", "endurance", "long_ride", "easy"],
-            ["endurance", "tempo", "easy", "long_ride", "recovery"],
+            ["strength_endurance", "endurance", "easy",       "long_ride", "recovery"],
+            ["endurance",          "strength_endurance", "endurance", "long_ride", "easy"],
+            ["strength_endurance", "endurance", "endurance",  "long_ride", "recovery"],
         ],
+        # Friel Build phase: MusFo gives way to Muscular Endurance (ME) — longer
+        # sustained sweetspot intervals at moderate low cadence.  One
+        # strength_endurance session is kept per week in early build to maintain
+        # the force adaptation while sweetspot/threshold volume grows.
         "build": [
-            ["sweetspot", "endurance", "easy", "sweetspot", "long_ride"],
-            ["sweetspot", "threshold", "endurance", "long_ride", "recovery"],
-            ["sweetspot", "sweetspot", "endurance", "threshold", "long_ride"],
+            ["strength_endurance", "endurance", "easy",       "sweetspot",  "long_ride"],
+            ["sweetspot",          "threshold", "endurance",  "long_ride",  "recovery"],
+            ["sweetspot",          "sweetspot", "strength_endurance", "threshold", "long_ride"],
         ],
         "peak": [
             ["threshold", "endurance", "vo2max", "endurance", "threshold"],
@@ -338,11 +359,15 @@ def _phase(week: int, event_week: int) -> str:
 # event_type. The trained model picks up these patterns via the
 # (primary_goal, days_to_event, workout_type) feature triple.
 _SYNTH_EVENT_BIAS: dict[str, dict[str, str]] = {
-    "climbing_camp":   {"vo2max": "sweetspot", "threshold": "sweetspot", "tempo": "long_ride"},
+    # Alps-style climbs: sustained sweetspot + low-cadence force + long Z2.
+    # threshold → strength_endurance teaches the model that climbing prep
+    # favours muscular endurance over short VO2-style threshold work.
+    "climbing_camp":   {"vo2max": "sweetspot", "threshold": "strength_endurance", "tempo": "long_ride"},
     "gran_fondo":      {"vo2max": "sweetspot", "threshold": "tempo"},
     "ultra_endurance": {"vo2max": "endurance", "threshold": "tempo", "sweetspot": "endurance"},
     "mtb_marathon":    {"threshold": "sweetspot", "tempo": "sweetspot"},
-    "stage_race":      {"vo2max": "threshold"},
+    # Stage races also include mountain stages → some strength_endurance blocks.
+    "stage_race":      {"vo2max": "threshold", "sweetspot": "strength_endurance"},
     "crit":            {"sweetspot": "vo2max", "tempo": "vo2max"},
     "tt":              {"vo2max": "threshold", "sweetspot": "threshold"},
     "long_road":       {"tempo": "sweetspot"},
@@ -396,8 +421,9 @@ _PROBE_PHASE_CONFIG: list[tuple[str, int]] = [
 # own sport-science logic.
 _PROBE_SCHEDULES: dict[str, dict[str, list[str]]] = {
     COGGAN_FRIEL: {
-        "base":          ["endurance", "endurance", "tempo",     "long_ride",  "easy"],
-        "build":         ["sweetspot", "endurance", "sweetspot", "threshold",  "long_ride"],
+        # Probe base: must include force work — that's the defining Friel base signal.
+        "base":          ["strength_endurance", "endurance", "endurance",  "long_ride",  "easy"],
+        "build":         ["sweetspot", "strength_endurance", "sweetspot", "threshold",  "long_ride"],
         "peak":          ["threshold", "endurance", "vo2max",    "easy",       "threshold"],
         "taper":         ["easy",      "threshold", "recovery",  "easy",       "endurance"],
         "recovery_week": ["recovery",  "easy",      "recovery",  "easy"],
@@ -461,6 +487,10 @@ def _simulate_probe_season(
                                   if isinstance(phase_options[0], list)
                                   else phase_options)
 
+            # Apply the same event bias used in the real simulation so probe
+            # blocks for climbing athletes contain strength_endurance.
+            weekly_wts = _apply_event_bias(weekly_wts, athlete.event_type, phase_name)
+
             if len(weekly_wts) > athlete.training_days:
                 weekly_wts = weekly_wts[: athlete.training_days]
 
@@ -497,7 +527,7 @@ def _simulate_probe_season(
                 days_since_last = 1
                 yesterday_workout = wt
                 yesterday_tss = tss
-                days_since_hard = 0 if wt in ("threshold", "vo2max", "race", "sprint", "sweetspot") else days_since_hard + 1
+                days_since_hard = 0 if wt in ("threshold", "vo2max", "race", "sprint", "sweetspot", "strength_endurance") else days_since_hard + 1
 
                 rows.append(row)
 
@@ -535,7 +565,10 @@ _PC_EFFORT: dict[str, tuple] = {
     "vo2max":    ((0.35, 0.62), (0.62, 0.85), (0.85, 1.00), (0.72, 0.88)),
     "sprint":    ((0.80, 1.00), (0.75, 0.98), (0.45, 0.65), (0.48, 0.65)),
     "race":      ((0.55, 0.88), (0.65, 0.88), (0.80, 0.98), (0.85, 0.98)),
-    "long_ride": ((0.12, 0.28), (0.18, 0.30), (0.35, 0.52), (0.55, 0.72)),
+    "long_ride":          ((0.12, 0.28), (0.18, 0.30), (0.35, 0.52), (0.55, 0.72)),
+    # Low-cadence force: 20-min output is high (targets FTP-range muscular endurance);
+    # short anaerobic durations are suppressed (not the purpose of the session).
+    "strength_endurance": ((0.12, 0.25), (0.22, 0.38), (0.65, 0.85), (0.88, 1.00)),
 }
 
 # Per-workout autonomic stress (relative units; calibrated against
@@ -550,7 +583,8 @@ _AUTO_STRESS = {
     "vo2max":    1.30,
     "sprint":    0.95,
     "race":      1.50,
-    "long_ride": 0.85,
+    "long_ride":          0.85,
+    "strength_endurance": 0.85,  # similar neuromuscular cost to sweetspot
 }
 
 
@@ -680,8 +714,12 @@ def _simulate_ride(
     humidity = float(rng.uniform(30, 90))
     wind_kmh = float(rng.uniform(0, 40))
 
-    cadence = (float(rng.uniform(82, 100)) if wt not in ("sprint", "race")
-               else float(rng.uniform(90, 110)))
+    if wt == "strength_endurance":
+        cadence = float(rng.uniform(50, 65))   # low-cadence force work (50-65 rpm)
+    elif wt in ("sprint", "race"):
+        cadence = float(rng.uniform(90, 110))
+    else:
+        cadence = float(rng.uniform(82, 100))
 
     rpe = float(rng.uniform(*T["rpe"]))
     if tsb < -25:
@@ -824,7 +862,7 @@ def _adapt_ftp(
     tss_z2  = sum(week_tss_by_type.get(w, 0) for w in ("easy", "endurance", "long_ride"))
     tss_hi  = sum(week_tss_by_type.get(w, 0) for w in ("threshold", "vo2max"))
     tss_spr = week_tss_by_type.get("sprint", 0)
-    tss_mod = sum(week_tss_by_type.get(w, 0) for w in ("tempo", "sweetspot"))
+    tss_mod = sum(week_tss_by_type.get(w, 0) for w in ("tempo", "sweetspot", "strength_endurance"))
 
     z2_signal_base = min(tss_z2 / 220.0, 1.0) * 0.45
     if athlete.philosophy == POGACAR_Z2:
@@ -1005,7 +1043,7 @@ def _simulate_athlete(
             days_since_last = 1
             yesterday_workout = wt
             yesterday_tss = tss
-            if wt in ("threshold", "vo2max", "race", "sprint", "sweetspot"):
+            if wt in ("threshold", "vo2max", "race", "sprint", "sweetspot", "strength_endurance"):
                 days_since_hard = 0
             else:
                 days_since_hard += 1

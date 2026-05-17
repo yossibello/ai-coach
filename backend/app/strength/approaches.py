@@ -108,11 +108,12 @@ class FrielApproach:
     )
 
     def sessions_per_week(self, phase: str) -> int:
-        # Friel CTB: AA early base = 3×, late base/MS = 2×, SM peak = 1×
-        return {"base_build": 3, "build": 2, "peak": 1, "recovery_week": 0}.get(phase, 1)
+        # Friel CTB: AA early base = 3×, late base/MS = 2×, SM peak = 1×, taper/race = 0
+        return {"base_build": 3, "build": 2, "peak": 1,
+                "taper": 0, "event_week": 0, "recovery_week": 0}.get(phase, 1)
 
     def get_sessions(self, phase: str) -> list[StrengthSession]:
-        if phase == "recovery_week":
+        if phase in ("recovery_week", "taper", "event_week"):
             return []
         if phase == "base_build":
             # Friel: 3×/week in AA — A, B, A rotation
@@ -265,10 +266,10 @@ class MinimumDoseApproach:
     )
 
     def sessions_per_week(self, phase: str) -> int:
-        return 0 if phase == "recovery_week" else 2
+        return 0 if phase in ("recovery_week", "taper", "event_week") else 2
 
     def get_sessions(self, phase: str) -> list[StrengthSession]:
-        if phase == "recovery_week":
+        if phase in ("recovery_week", "taper", "event_week"):
             return []
         session = self._the_session()
         return [session, session]
@@ -324,10 +325,10 @@ class GreaseTheGrooveApproach:
 
     def sessions_per_week(self, phase: str) -> int:
         # GTG runs every day — it's presented as daily 'active' sessions
-        return 0 if phase == "recovery_week" else 5
+        return 0 if phase in ("recovery_week", "taper", "event_week") else 5
 
     def get_sessions(self, phase: str) -> list[StrengthSession]:
-        if phase == "recovery_week":
+        if phase in ("recovery_week", "taper", "event_week"):
             return []
         session = StrengthSession(
             name="GTG Daily Practice",

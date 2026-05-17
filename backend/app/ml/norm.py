@@ -22,6 +22,7 @@ from app.ml.model import ACTIVITY_FEATURES, PROFILE_FEATURES, ACTIVITY_DIM, PROF
 WORKOUT_TYPES: list[str] = [
     "recovery", "easy", "endurance", "tempo", "sweetspot",
     "threshold", "vo2max", "sprint", "race", "long_ride",
+    "strength_endurance",   # low-cadence force work for climbing events
 ]
 WORKOUT_TYPE_IDX: dict[str, int] = {n: i for i, n in enumerate(WORKOUT_TYPES)}
 

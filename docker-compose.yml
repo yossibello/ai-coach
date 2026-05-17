@@ -42,6 +42,7 @@ services:
       STRAVA_CLIENT_ID: ${STRAVA_CLIENT_ID}
       STRAVA_CLIENT_SECRET: ${STRAVA_CLIENT_SECRET}
       OPENAI_API_KEY: ${OPENAI_API_KEY}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
       ML_MODEL_PATH: /app/models/cycling_coach.pt
       ENVIRONMENT: ${ENVIRONMENT:-development}
     volumes:

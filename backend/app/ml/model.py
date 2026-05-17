@@ -49,10 +49,10 @@ ACTIVITY_FEATURES = [
     # Temporal
     "day_of_week_sin", "day_of_week_cos", "month_sin", "month_cos",
     "days_since_last_ride",
-    # Workout type (one-hot 10 classes)
+    # Workout type (one-hot 11 classes)
     "wt_recovery", "wt_easy", "wt_endurance", "wt_tempo",
     "wt_sweetspot", "wt_threshold", "wt_vo2max", "wt_sprint",
-    "wt_race", "wt_long_ride",
+    "wt_race", "wt_long_ride", "wt_strength_endurance",
     # Perceived exertion / notes
     "rpe_norm",
     # ── Health & recovery (Garmin daily wellness on the day of the ride) ──
@@ -167,7 +167,7 @@ class CyclingTransformer(nn.Module):
         dim_feedforward: int = 512,
         dropout: float = 0.1,
         max_seq_len: int = 180,  # up to 180 activities
-        num_workout_types: int = 10,
+        num_workout_types: int = 11,
         horizon_dim: int = HORIZON_DIM,
     ):
         super().__init__()

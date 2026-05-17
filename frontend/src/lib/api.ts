@@ -156,9 +156,9 @@ export const coachAPI = {
       .then((r) => r.data),
 
   // Macrocycle: week-by-week reverse-periodization plan from today to event date.
-  // Returns 404 if user has no goal_event_date set.
-  getMacrocycle: () =>
-    api.get<Macrocycle>("/api/v1/coach/macrocycle").then((r) => r.data),
+  // Pass days to get a horizon-scoped view (28 for medium, 7 for short, omit for event).
+  getMacrocycle: (days?: number) =>
+    api.get<Macrocycle>("/api/v1/coach/macrocycle", { params: days != null ? { days } : undefined }).then((r) => r.data),
 
   analyzeActivity: (activityId: string) =>
     api.get<{ analysis: string; insights: string[] }>(

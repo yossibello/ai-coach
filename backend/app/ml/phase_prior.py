@@ -30,6 +30,7 @@ from app.ml.cold_start import _EVENT_BIAS
 WORKOUT_TYPE_NAMES = [
     "recovery", "easy", "endurance", "tempo", "sweetspot",
     "threshold", "vo2max", "sprint", "race", "long_ride",
+    "strength_endurance",   # low-cadence force work; added alongside new model training
 ]
 N_TYPES = len(WORKOUT_TYPE_NAMES)
 _NAME_TO_IDX = {n: i for i, n in enumerate(WORKOUT_TYPE_NAMES)}
@@ -45,31 +46,37 @@ PHASE_PRIORS_RAW: dict[str, dict[str, float]] = {
         "endurance": 5.0, "easy": 3.0, "long_ride": 2.0, "recovery": 1.0,
         "tempo": 1.0, "sweetspot": 0.7, "threshold": 0.5, "vo2max": 0.3,
         "sprint": 0.2, "race": 0.05,
+        "strength_endurance": 2.0,   # Friel Priority 1 in base — force reps every week
     },
-    "base_build": {  # alias used by cold_start.WEEKLY_PATTERNS
+    "base_build": {
         "endurance": 4.5, "easy": 2.5, "long_ride": 2.0, "recovery": 1.0,
         "tempo": 1.5, "sweetspot": 1.2, "threshold": 0.7, "vo2max": 0.4,
         "sprint": 0.3, "race": 0.05,
+        "strength_endurance": 1.5,   # continues into base-build as ME work
     },
     "build": {
         "endurance": 3.5, "easy": 1.5, "long_ride": 1.8, "recovery": 1.0,
         "tempo": 1.2, "sweetspot": 1.5, "threshold": 1.5, "vo2max": 1.5,
         "sprint": 0.5, "race": 0.1,
+        "strength_endurance": 1.2,   # ME sessions alongside sweetspot/threshold
     },
     "peak": {
         "endurance": 2.0, "easy": 1.0, "long_ride": 1.0, "recovery": 1.0,
         "tempo": 0.8, "sweetspot": 1.2, "threshold": 1.8, "vo2max": 2.0,
         "sprint": 0.7, "race": 0.3,
+        "strength_endurance": 0.4,   # fades in peak — intensity focus takes over
     },
     "taper": {
         "endurance": 2.0, "easy": 1.5, "long_ride": 0.3, "recovery": 1.5,
         "tempo": 0.5, "sweetspot": 0.6, "threshold": 0.7, "vo2max": 0.8,
         "sprint": 0.6, "race": 0.5,
+        "strength_endurance": 0.1,   # essentially never in taper
     },
     "recovery_week": {
         "endurance": 1.5, "easy": 3.0, "long_ride": 0.3, "recovery": 4.0,
         "tempo": 0.3, "sweetspot": 0.2, "threshold": 0.05, "vo2max": 0.05,
         "sprint": 0.05, "race": 0.0,
+        "strength_endurance": 0.05,  # never in recovery week
     },
 }
 
@@ -129,7 +136,7 @@ def safety_factor(tsb: float | None, hrv_z: float | None) -> np.ndarray:
     risk. We translate that to a 0.3× multiplier on threshold/VO2/sprint/race.
     """
     factors = np.ones(N_TYPES, dtype=np.float32)
-    risky = ("threshold", "vo2max", "sprint", "race", "sweetspot")
+    risky = ("threshold", "vo2max", "sprint", "race", "sweetspot", "strength_endurance")
     if tsb is not None and tsb < -25:
         for w in risky:
             factors[_NAME_TO_IDX[w]] *= 0.4
@@ -167,7 +174,13 @@ def posterior(
     Returns:
         (N_TYPES,) posterior probability vector that sums to 1.
     """
-    z = np.asarray(logits, dtype=np.float64) / max(temperature, 1e-3)
+    # Pad or truncate logits to N_TYPES so old checkpoints (fewer classes)
+    # and future checkpoints (more classes) both work without a crash.
+    z = np.zeros(N_TYPES, dtype=np.float64)
+    src = np.asarray(logits, dtype=np.float64)
+    n = min(len(src), N_TYPES)
+    z[:n] = src[:n]
+    z /= max(temperature, 1e-3)
     z -= z.max()
     likelihood = np.exp(z)
     likelihood /= likelihood.sum()

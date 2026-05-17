@@ -135,6 +135,22 @@ WORKOUT_LIBRARY: dict[str, dict[str, Any]] = {
         "target_tss": 120,
         "rationale": "The long ride builds deep aerobic infrastructure, fat adaptation, and mental durability.",
     },
+    # UI card metadata for when the trained model recommends this workout type.
+    # Low-cadence (50-55 rpm) sweetspot intervals — the primary adaptation
+    # target for Alpine climbers. Builds the muscular endurance to sustain
+    # power on gradients that force a low, grinding cadence.
+    "strength_endurance": {
+        "description": "Low-cadence force work — muscular endurance for climbers.",
+        "key_metric": "Keep cadence 50-55 rpm throughout intervals. Power 88-95% FTP. Resist the urge to spin up.",
+        "structures": [
+            {"phase": "warmup",  "duration_minutes": 15, "power_target_pct_ftp": 60,  "description": "Spin up, high cadence"},
+            {"phase": "main",    "duration_minutes": 48, "power_target_pct_ftp": 91,  "description": "4×12 min @90-95% FTP, 50-55 rpm — 3 min easy spin between"},
+            {"phase": "cooldown","duration_minutes": 12, "power_target_pct_ftp": 50,  "description": "Easy spin to flush legs"},
+        ],
+        "duration_minutes": 75,
+        "target_tss": 70,
+        "rationale": "Pedalling at low cadence under load recruits more slow-twitch muscle fibres and builds the torque-sustaining capacity essential for Alpine cols.",
+    },
 }
 
 # Periodization: 3-week loading + 1-week recovery macro-cycle
@@ -254,8 +270,8 @@ def build_cold_start_recommendation(
     # Insights
     insights = _build_insights(ctl, atl, tsb, ftp, activity_count, phase)
 
-    # Risks
-    risks = _build_risks(tsb, ctl, atl)
+    # Risks — pass recent_types count as proxy for TSS data quality
+    risks = _build_risks(tsb, ctl, atl, tss_data_quality=len(recent_types))
 
     # Forecast (conservative rule-based)
     if activity_count < 10:
@@ -342,9 +358,19 @@ def _build_insights(
     return insights
 
 
-def _build_risks(tsb: float, ctl: float, atl: float) -> list[dict[str, Any]]:
+def _build_risks(
+    tsb: float,
+    ctl: float,
+    atl: float,
+    tss_data_quality: int = 10,  # number of recent rides with usable TSS data
+) -> list[dict[str, Any]]:
     risks = []
-    ramp_rate = atl - ctl  # approx weekly CTL increase proxy
+
+    # Don't fire TSS-based risks if we have too few rides with power/HR data.
+    # A low CTL/ATL baseline from zero-TSS rides makes every real ride look
+    # like a spike — the numbers are meaningless without consistent data.
+    if tss_data_quality < 5 or ctl < 5:
+        return risks
 
     if tsb < -30:
         risks.append({
@@ -353,19 +379,23 @@ def _build_risks(tsb: float, ctl: float, atl: float) -> list[dict[str, Any]]:
             "message": f"TSB is {round(tsb)} — very deep fatigue. "
                        "Take 2-3 easy days before any quality work.",
         })
-    elif tsb < -15:
+    elif tsb < -20:
         risks.append({
             "type": "overtraining",
             "severity": "medium",
-            "message": "Moderate fatigue (TSB < -15). Schedule a recovery day soon.",
+            "message": f"Fatigue is elevated (TSB {round(tsb)}). "
+                       "Keep the next session easy and prioritise sleep.",
         })
 
-    if ramp_rate > 10:
+    # Rapid ramping: ATL >40% above CTL means recent load has spiked vs base.
+    # Only meaningful when CTL is established (>10) — below that, any single
+    # ride skews the ratio on a near-zero baseline.
+    if ctl > 10 and atl / ctl > 1.4:
         risks.append({
             "type": "injury",
             "severity": "medium",
-            "message": "Training load is ramping quickly. "
-                       "Keep weekly TSS increases below 10% to reduce injury risk.",
+            "message": "Acute load is spiking relative to your fitness base. "
+                       "Consider an easier week to let your body absorb the work.",
         })
 
     if ctl > 0 and atl / ctl < 0.6:

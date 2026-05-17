@@ -45,8 +45,9 @@ PARSER_VERSION = "v1"
 NUMBER_RE = re.compile(r"(?<![A-Za-z\d])(\d+(?:[.,]\d+)?)(?![A-Za-z])")
 UNIT_RE = re.compile(
     r"(ng/mL|µg/dL|ug/dL|mcg/dL|mg/dL|g/dL|µg/L|ug/L|mcg/L|g/L|"
-    r"pg/mL|mIU/L|µIU/mL|uIU/mL|nmol/L|pmol/L|µmol/L|umol/L|mmol/L|"
+    r"pg/mL|mIU/L|µIU/mL|uIU/mL|nmol/L|pmol/L|µmol/L|umol/L|mmol/mol|mmol/L|"
     r"µkat/L|ukat/L|mkat/L|"
+    r"10E12/L|10E9/L|fL|mE/L|mm/h|"
     r"U/L|IU/L|%|mL/min/1\.73m²)",
     re.IGNORECASE,
 )
@@ -93,11 +94,11 @@ def parse_blood_test_pdf(pdf_bytes: bytes, sex: Optional[str] = None) -> dict:
 
         if vision_extractor and vision_extractor.is_available():
             vision_result = vision_extractor.extract_via_vision(pdf_bytes, sex=sex)
-            # Use vision result if it found more markers than the regex pass
             text_count = len(text_result.get("markers", {})) if text_result else 0
             vision_count = len(vision_result.get("markers", {}))
-            if vision_count > text_count:
-                # Merge any warnings from the regex pass for transparency
+            # Always prefer vision when there was no text at all (image PDF).
+            # Also prefer vision when it found more markers than the regex pass.
+            if text_result is None or vision_count > text_count:
                 if text_result and text_result.get("warnings"):
                     vision_result.setdefault("warnings", []).extend(text_result["warnings"])
                 return vision_result
@@ -166,8 +167,21 @@ def _parse_text(text: str, sex: Optional[str]) -> dict:
             value_norm, unit_norm = value, (unit or "")
 
         m_def = MARKERS[marker_key]
-        ref_low = rng_low if rng_low is not None else m_def["ref_low"]
-        ref_high = rng_high if rng_high is not None else m_def["ref_high"]
+        # Convert the extracted ref range with the same unit as the value.
+        # Only use PDF ref values if BOTH are present — mixing PDF + canonical
+        # produces Frankenstein ranges (e.g. "0.6–100" for creatinine).
+        if rng_low is not None and rng_high is not None:
+            try:
+                rng_low, _ = normalize_unit(marker_key, rng_low, unit)
+                rng_high, _ = normalize_unit(marker_key, rng_high, unit)
+                rng_low = round(rng_low, 3)
+                rng_high = round(rng_high, 3)
+            except Exception:
+                rng_low, rng_high = None, None
+        if rng_low is not None and rng_high is not None:
+            ref_low, ref_high = rng_low, rng_high
+        else:
+            ref_low, ref_high = m_def["ref_low"], m_def["ref_high"]
         if sex and "sex_specific" in m_def and sex.lower() in m_def["sex_specific"]:
             ref_low, ref_high = m_def["sex_specific"][sex.lower()]
 

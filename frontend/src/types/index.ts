@@ -86,6 +86,12 @@ export interface Activity {
   humidity_pct?: number;
   wind_speed_kmh?: number;
 
+  // Power curve — best W/kg at each duration
+  pc_5s_wkg?: number;
+  pc_1min_wkg?: number;
+  pc_5min_wkg?: number;
+  pc_20min_wkg?: number;
+
   // Derived metrics
   aerobic_efficiency?: number;  // Pw:HR ratio
   variability_index?: number;   // NP/AP ratio
@@ -96,6 +102,17 @@ export interface Activity {
   workout_type?: WorkoutType;
   perceived_exertion?: number;  // 1-10
   notes?: string;
+
+  // Source metadata
+  device_watts?: boolean;   // true = real power meter (not virtual/estimated)
+  trainer?: boolean;
+  kudos_count?: number;
+
+  // Data quality
+  quality_score?: "high" | "medium" | "low" | "rejected";
+  quality_reasons?: string[];
+  review_status?: "confirmed" | "pending" | "quarantined" | "deleted";
+  is_outlier?: boolean;
 }
 
 export interface TimeInZones {

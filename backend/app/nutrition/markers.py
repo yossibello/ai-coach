@@ -91,10 +91,10 @@ MARKERS: dict[str, dict] = {
     "vitamin_d": {
         "label": "Vitamin D (25-OH)",
         "category": "vitamins",
-        "aliases": ["25-oh", "25(oh)d", "vitamin d", "vit d", "calcidiol", "25 hydroxy", "kalcidiol", "d-vitamin", "25-oh-vitamin d"],
+        "aliases": ["25-oh", "25(oh)d", "vitamin d", "vit d", "calcidiol", "25 hydroxy", "kalcidiol", "d-vitamin", "25-oh-vitamin d", "s-25-oh vitamin d"],
         "unit": "ng/mL",
         "ref_low": 30, "ref_high": 100,
-        "athlete_optimal_low": 40, "athlete_optimal_high": 80,
+        "athlete_optimal_low": 30, "athlete_optimal_high": 80,
         "critical_low": 20, "critical_high": 150,
         "performance_note": "<30 ng/mL is associated with impaired bone health, "
                             "muscle function, and immunity (Owens 2018).",
@@ -107,7 +107,7 @@ MARKERS: dict[str, dict] = {
         "aliases": ["b12", "cobalamin", "vitamin b-12", "kobalamin", "s-kobalamin"],
         "unit": "pg/mL",
         "ref_low": 200, "ref_high": 900,
-        "athlete_optimal_low": 400, "athlete_optimal_high": 900,
+        "athlete_optimal_low": 300, "athlete_optimal_high": 900,
         "critical_low": 150, "critical_high": 2000,
         "performance_note": "Vegan/vegetarian athletes are at high risk; "
                             "deficiency causes macrocytic anemia and fatigue.",
@@ -171,6 +171,15 @@ MARKERS: dict[str, dict] = {
         "athlete_optimal_low": 9.0, "athlete_optimal_high": 10.3,
         "critical_low": 7.5, "critical_high": 11.5,
     },
+    "calcium_ionized": {
+        "label": "Calcium (ionized)",
+        "category": "minerals",
+        "aliases": ["ionized calcium", "ionised calcium", "calcium, ionized", "joniserat calcium", "s-joniserat calcium", "ca2+", "ca++"],
+        "unit": "mmol/L",
+        "ref_low": 1.12, "ref_high": 1.32,
+        "athlete_optimal_low": 1.15, "athlete_optimal_high": 1.30,
+        "critical_low": 0.80, "critical_high": 1.60,
+    },
     "sodium": {
         "label": "Sodium",
         "category": "electrolytes",
@@ -214,7 +223,7 @@ MARKERS: dict[str, dict] = {
     "free_t4": {
         "label": "Free T4",
         "category": "thyroid",
-        "aliases": ["free t4", "ft4", "thyroxine, free", "fritt t4", "fritt tyroxin"],
+        "aliases": ["free t4", "ft4", "thyroxine, free", "fritt t4", "fritt tyroxin", "s-fritt t4", "tyroxin"],
         "unit": "ng/dL",
         "ref_low": 0.8, "ref_high": 1.8,
         "athlete_optimal_low": 1.0, "athlete_optimal_high": 1.6,
@@ -344,7 +353,7 @@ MARKERS: dict[str, dict] = {
     "hba1c": {
         "label": "HbA1c",
         "category": "metabolic",
-        "aliases": ["hba1c", "a1c", "glycated hemoglobin", "glycohemoglobin"],
+        "aliases": ["hba1c", "a1c", "glycated hemoglobin", "glycohemoglobin", "b-hba1c"],
         "unit": "%",
         "ref_low": 4.0, "ref_high": 5.6,
         "athlete_optimal_low": 4.5, "athlete_optimal_high": 5.4,
@@ -412,6 +421,85 @@ MARKERS: dict[str, dict] = {
         "athlete_optimal_low": 8, "athlete_optimal_high": 12,
         "critical_low": 2, "critical_high": 16,
     },
+
+    # ─── Amino acids / methylation ───────────────────────────────────────────
+    "homocysteine": {
+        "label": "Homocysteine",
+        "category": "methylation",
+        "aliases": ["homocysteine", "homocystein", "s-homocystein", "p-homocystein", "hcy"],
+        "unit": "µmol/L",
+        "ref_low": 0, "ref_high": 15,
+        "athlete_optimal_low": 0, "athlete_optimal_high": 10,
+        "critical_low": 0, "critical_high": 50,
+        "performance_note": ">15 µmol/L → impaired methylation; B12/folate deficiency often causal.",
+    },
+
+    # ─── Complete blood count (CBC) ──────────────────────────────────────────
+    "wbc": {
+        "label": "White Blood Cells (WBC)",
+        "category": "cbc",
+        "aliases": ["wbc", "white blood cell", "leukocytes", "leukocyter", "b-leukocyter", "leucocytes"],
+        "unit": "×10⁹/L",
+        "ref_low": 4.0, "ref_high": 11.0,
+        "athlete_optimal_low": 4.0, "athlete_optimal_high": 8.0,
+        "critical_low": 2.5, "critical_high": 20.0,
+    },
+    "rbc": {
+        "label": "Red Blood Cells (RBC)",
+        "category": "cbc",
+        "aliases": ["rbc", "red blood cell", "erythrocytes", "erytrocyter", "b-erytrocyter", "erythrocyte count"],
+        "unit": "×10¹²/L",
+        "ref_low": 4.2, "ref_high": 5.9,
+        "athlete_optimal_low": 4.5, "athlete_optimal_high": 5.5,
+        "critical_low": 3.0, "critical_high": 7.0,
+        "sex_specific": {"female": (3.8, 5.2), "male": (4.5, 5.9)},
+    },
+    "platelets": {
+        "label": "Platelets",
+        "category": "cbc",
+        "aliases": ["platelets", "thrombocytes", "thrombocyter", "trombocyter", "b-trombocyter", "plt"],
+        "unit": "×10⁹/L",
+        "ref_low": 150, "ref_high": 400,
+        "athlete_optimal_low": 150, "athlete_optimal_high": 400,
+        "critical_low": 50, "critical_high": 1000,
+    },
+    "mcv": {
+        "label": "MCV",
+        "category": "cbc",
+        "aliases": ["mcv", "b-mcv", "mean corpuscular volume"],
+        "unit": "fL",
+        "ref_low": 80, "ref_high": 100,
+        "athlete_optimal_low": 82, "athlete_optimal_high": 98,
+        "critical_low": 70, "critical_high": 115,
+    },
+    "mch": {
+        "label": "MCH",
+        "category": "cbc",
+        "aliases": ["mch", "b-mch", "mean corpuscular hemoglobin"],
+        "unit": "pg",
+        "ref_low": 27, "ref_high": 33,
+        "athlete_optimal_low": 27, "athlete_optimal_high": 33,
+        "critical_low": 20, "critical_high": 40,
+    },
+    "mchc": {
+        "label": "MCHC",
+        "category": "cbc",
+        "aliases": ["mchc", "b-mchc", "mean corpuscular hemoglobin concentration"],
+        "unit": "g/dL",
+        "ref_low": 32, "ref_high": 36,
+        "athlete_optimal_low": 32, "athlete_optimal_high": 36,
+        "critical_low": 28, "critical_high": 38,
+    },
+    "esr": {
+        "label": "ESR (Sedimentation Rate)",
+        "category": "inflammation",
+        "aliases": ["esr", "erythrocyte sedimentation", "sedimentation rate", "b-sr", "sr,", "b-sr,", "sänka"],
+        "unit": "mm/h",
+        "ref_low": 0, "ref_high": 20,
+        "athlete_optimal_low": 0, "athlete_optimal_high": 15,
+        "critical_low": 0, "critical_high": 100,
+        "sex_specific": {"female": (0, 30), "male": (0, 20)},
+    },
 }
 
 
@@ -455,6 +543,16 @@ SPECIFIC_CONVERSIONS: dict[str, dict[str, float]] = {
     "creatinine": {"µmol/L": 1 / 88.4, "umol/L": 1 / 88.4},  # → mg/dL
     "urea":       {"mmol/L": 2.801},                  # urea mmol/L → mg/dL (BUN)
     "hematocrit": {"L/L": 100.0, "ratio": 100.0},     # 0.45 L/L → 45 %
+    # Thyroid — Swedish mE/L ≡ mIU/L for TSH
+    "tsh":        {"mE/L": 1.0},
+    # Free T4: pmol/L → ng/dL (T4 MW 776.87 g/mol)
+    "free_t4":    {"pmol/L": 0.0777},
+    # CBC cell counts: 10E9/L and 10E12/L arrive from UNIT_RE as-is
+    "wbc":        {"10E9/L": 1.0,  "10e9/l": 1.0},
+    "platelets":  {"10E9/L": 1.0,  "10e9/l": 1.0},
+    "rbc":        {"10E12/L": 1.0, "10e12/l": 1.0},
+    # MCHC in Swedish labs often reported as g/L
+    "mchc":       {"g/L": 0.1},
 }
 
 
@@ -463,9 +561,19 @@ def normalize_unit(marker_key: str, value: float, unit: Optional[str]) -> tuple[
     if marker_key not in MARKERS:
         return value, unit or ""
     target = MARKERS[marker_key]["unit"]
-    if not unit or unit.strip().lower() == target.lower():
+    u = (unit or "").strip()
+
+    # Special: hematocrit as decimal fraction — ANY value ≤ 1.0 must be a fraction.
+    # 0.44 L/L or 0.44 % are both physically impossible as a real %; multiply by 100.
+    if marker_key == "hematocrit" and value <= 1.0:
+        return round(value * 100.0, 1), target
+
+    # Special: HbA1c IFCC (mmol/mol) → NGSP (%) — nonlinear, can't use simple factor
+    if marker_key == "hba1c" and u.lower() == "mmol/mol":
+        return round(value * 0.0915 + 2.15, 2), target
+
+    if not u or u.lower() == target.lower():
         return value, target
-    u = unit.strip()
     spec = SPECIFIC_CONVERSIONS.get(marker_key, {})
     if u in spec:
         return value * spec[u], target

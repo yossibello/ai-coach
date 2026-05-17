@@ -29,4 +29,6 @@ export default withPWA({
   register: true,
   skipWaiting: true,
   disable: process.env.NODE_ENV === "development",
+  // Never cache API calls — they are authenticated and change with every ride.
+  runtimeCaching: [],
 })(nextConfig);

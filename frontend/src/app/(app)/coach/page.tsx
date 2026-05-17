@@ -30,13 +30,6 @@ export default function CoachPage() {
     staleTime: 0, // always refetch — plan changes with every profile/training update
   });
 
-  // Macrocycle: reverse-periodization plan. 404 silently if no goal_event_date.
-  const { data: macro } = useQuery({
-    queryKey: ["coach-macrocycle"],
-    queryFn: () => coachAPI.getMacrocycle().catch(() => null),
-    staleTime: 30 * 60 * 1000, // 30 min — changes only when plan/event changes
-  });
-
   // User-selected horizon override — persisted in localStorage so a page
   // refresh doesn't reset it back to the backend's default.
   const [horizonOverride, setHorizonOverride] = useState<HorizonKey | null>(() => {
@@ -57,6 +50,16 @@ export default function CoachPage() {
   }, [multi, horizonOverride]);
   const horizonPayload: HorizonPayload | undefined =
     multi && activeHorizon ? multi.horizons[activeHorizon] : undefined;
+
+  // Macrocycle days param: short=7, medium=28, event=no override (uses real event date).
+  const macroDays = activeHorizon === "short" ? 7 : activeHorizon === "medium" ? 28 : undefined;
+
+  // Macrocycle: reverse-periodization plan, re-fetched when horizon changes.
+  const { data: macro } = useQuery({
+    queryKey: ["coach-macrocycle", macroDays ?? "event"],
+    queryFn: () => coachAPI.getMacrocycle(macroDays).catch(() => null),
+    staleTime: 30 * 60 * 1000, // 30 min — changes only when plan/event changes
+  });
 
   const refresh = useMutation({
     mutationFn: () => coachAPI.refreshRecommendation(),
@@ -611,17 +614,23 @@ function MacrocycleCard({
     weekday: "short", month: "short", day: "numeric",
   });
 
-  // How many weeks are "in scope" for the active horizon
-  const inScopeWeeks =
-    activeHorizon === "short"  ? 1 :
-    activeHorizon === "medium" ? 4 :
-    macro.weeks.length;
+  // All returned weeks are in scope — macrocycle is now fetched per-horizon window.
+  const inScopeWeeks = macro.weeks.length;
 
-  // Card title changes to match the selected horizon
+  // Card title changes to match the selected horizon.
+  // For the "event" horizon, derive from the backend horizon_label so that
+  // "general FTP" users don't see "Plan to Alpe d'HuZes" from a stale event name.
+  // The label is either "Alpe d'HuZes · 60d out" (real event) or "Long-term base · 90 days".
+  const eventCardTitle = (() => {
+    const lbl = horizonPayload?.horizon_label ?? "";
+    if (!lbl || lbl.startsWith("Long-term")) return "Long-term Training";
+    // Real event: strip " · Nd out" / " — race day!" suffix
+    return `Plan to ${lbl.split("·")[0].split("—")[0].trim()}`;
+  })();
   const cardTitle =
     activeHorizon === "short"  ? "This Week" :
     activeHorizon === "medium" ? "Next 4 Weeks" :
-    `Plan to ${macro.event_name || "event"}`;
+    eventCardTitle;
 
   const horizonSubtitle = horizonPayload?.horizon_label;
 
@@ -744,17 +753,19 @@ function MacrocycleWeekCell({
   const date = new Date(week.week_start);
   const label = date.toLocaleDateString(undefined, { month: "short", day: "numeric" });
   const phaseStyle = PHASE_STYLES[week.phase] ?? PHASE_STYLES.build;
-  const displayPhase = focusOverride ? focusOverride.replace(/_/g, " ") : week.phase.replace("_", " ");
+  const displayPhase = focusOverride
+    ? focusOverride.replace(/_/g, " ")
+    : week.phase.replace(/_/g, " ");
 
   return (
     <div
       title={`${week.notes}\nFocus: ${week.workout_focus.join(", ")}`}
       className={cn(
-        "min-w-[88px] rounded-xl border p-2.5 text-center transition-all hover:-translate-y-0.5",
+        "min-w-[88px] rounded-xl border-2 p-2.5 text-center transition-all hover:-translate-y-0.5",
         phaseStyle,
-        week.is_recovery_week && "ring-1 ring-slate-500/40 ring-offset-1 ring-offset-surface-card",
-        isInScope && "ring-2 ring-brand-500/50 ring-offset-1 ring-offset-surface-card scale-[1.03]",
-        dimmed && "opacity-30 scale-95",
+        week.is_recovery_week && "border-slate-500/50",
+        isInScope && "border-brand-500 shadow-sm shadow-brand-500/30 brightness-110",
+        dimmed && "opacity-30",
       )}
     >
       <div className="text-[10px] opacity-70">W{week.week_index + 1} · {label}</div>
@@ -794,8 +805,11 @@ function HorizonPicker({
     event:  <Target className="w-3.5 h-3.5" />,
   };
   // "event" tab title comes from the backend label so it reflects whether
-  // the user has an actual event goal ("Alpe d'HuZes") or a generic one ("Long term")
-  const eventTitle = multi.horizons["event"]?.horizon_label?.split("·")[0].trim() ?? "Long term";
+  // The "event" tab title comes from the backend horizon_label:
+  // real event → "Alpe d'HuZes · 60d out" → "Alpe d'HuZes"
+  // no event  → "Long-term base · 90 days" → "Long-term"
+  const rawEventTitle = multi.horizons["event"]?.horizon_label?.split("·")[0].split("—")[0].trim() ?? "Long term";
+  const eventTitle = rawEventTitle.startsWith("Long-term") ? "Long term" : rawEventTitle;
   const TITLES: Record<HorizonKey, string> = {
     short:  "Short term",
     medium: "Medium build",
