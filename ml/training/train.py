@@ -144,10 +144,16 @@ def train(args):
         print("Compiling model with torch.compile…")
         model = torch.compile(model)
 
+    start_epoch = 0
     if args.checkpoint and os.path.exists(args.checkpoint):
-        state = torch.load(args.checkpoint, map_location=device)
-        model.load_state_dict(state)
-        print(f"Resumed from checkpoint: {args.checkpoint}")
+        ckpt = torch.load(args.checkpoint, map_location=device, weights_only=False)
+        # Handle both raw state_dict and full checkpoint dict (current format).
+        if isinstance(ckpt, dict) and "state_dict" in ckpt:
+            model.load_state_dict(ckpt["state_dict"])
+            start_epoch = ckpt.get("metrics", {}).get("epoch", 0)
+        else:
+            model.load_state_dict(ckpt)
+        print(f"Resumed from checkpoint: {args.checkpoint} (epoch {start_epoch})")
 
     if n_gpus > 1:
         # Force cuBLAS handle creation on every GPU before DataParallel spawns
@@ -167,7 +173,8 @@ def train(args):
 
     # ── Optimizer / Scheduler / Losses ────────────────────────────────────
     optimizer  = AdamW(model.parameters(), lr=args.lr, weight_decay=1e-4)
-    scheduler  = CosineAnnealingLR(optimizer, T_max=args.epochs, eta_min=1e-6)
+    scheduler  = CosineAnnealingLR(optimizer, T_max=args.epochs, eta_min=1e-6,
+                                   last_epoch=start_epoch - 1)
     scaler     = GradScaler(device=device.type, enabled=device.type == "cuda" and not args.no_amp)
     ce_loss       = nn.CrossEntropyLoss(label_smoothing=0.1)
     mse_loss      = nn.MSELoss()
@@ -198,7 +205,7 @@ def train(args):
     log_every = max(1, (steps_per_epoch or total_train_batches) // 10)  # print ~10x per epoch
 
     # ── Training loop ─────────────────────────────────────────────────────
-    for epoch in range(1, args.epochs + 1):
+    for epoch in range(start_epoch + 1, args.epochs + 1):
         model.train()
         train_loss = 0.0
         n_train_batches = 0
