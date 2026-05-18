@@ -104,9 +104,12 @@ def train(args):
     _total      = sum(_wt_counts.values())
     _n          = len(_WT)
     _freq       = [max(_wt_counts.get(i, 1), 1) / _total for i in range(_n)]
-    # Inverse-frequency, then normalise so mean = 1 (keeps overall loss scale).
-    # Cap at 8× to prevent extreme weights from dominating on very rare classes.
-    _raw_w      = [min(1.0 / (f * _n), 8.0) for f in _freq]
+    # Sqrt of inverse-frequency, capped at 3×, normalised so mean = 1.
+    # Linear inverse-freq (cap 8×) makes gradients on rare classes too large
+    # relative to the learning rate, causing oscillation. Sqrt is a softer
+    # re-weighting that nudges the model toward rare classes without dominating.
+    import math as _math
+    _raw_w      = [min(_math.sqrt(1.0 / (f * _n)), 3.0) for f in _freq]
     _mean_w     = sum(_raw_w) / _n
     _wt_class_w = [w / _mean_w for w in _raw_w]
     print(f"Workout class distribution: {dict(zip(_WT, [round(_wt_counts.get(i,0)/_total*100,1) for i in range(_n)]))}")
