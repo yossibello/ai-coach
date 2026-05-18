@@ -355,8 +355,13 @@ def train(args):
         if_mae_sum = 0.0
         ftp_mae_sum = 0.0
 
+        # Cap validation steps to match training steps (keeps epoch time predictable).
+        # Full val sweep would be 1000s of batches on large datasets.
+        _max_val_steps = args.steps_per_epoch if args.steps_per_epoch else len(val_loader)
         with torch.no_grad():
-            for batch in val_loader:
+            for _val_step, batch in enumerate(val_loader):
+                if _val_step >= _max_val_steps:
+                    break
                 x   = batch["x"].to(device)
                 di  = batch["day_idx"].to(device)
                 pm  = batch["padding_mask"].to(device)
