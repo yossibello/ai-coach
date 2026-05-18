@@ -229,7 +229,8 @@ def train(args):
             optimizer.step()
         for _ in range(start_epoch):
             scheduler.step()
-    scaler     = GradScaler(device=device.type, enabled=device.type == "cuda" and not args.no_amp)
+    _amp_device = device.type if device.type in ("cuda", "cpu") else "cpu"
+    scaler     = GradScaler(device=_amp_device, enabled=device.type == "cuda" and not args.no_amp)
     ce_loss       = nn.CrossEntropyLoss(
         label_smoothing=0.1,
         weight=torch.tensor(_wt_class_w, dtype=torch.float32, device=device),
@@ -290,7 +291,7 @@ def train(args):
             gw = goal_w_table[tgt_goal]   # (B, 3)
 
             optimizer.zero_grad()
-            with autocast(device_type=device.type, enabled=use_amp):
+            with autocast(device_type=_amp_device, enabled=use_amp):
                 out = model(x, di, pm, horizon_query=hq)
 
                 loss_wt  = ce_loss(out["workout_logits"], tgt_wt)

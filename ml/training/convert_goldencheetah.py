@@ -221,31 +221,59 @@ def convert_summary(input_dir: Path, output: Path, min_rides: int = 20) -> pd.Da
     vi_c   = _col(acts, "vi", "variability_index", "VI",
                   default=None)
 
-    # ── Merge MMP data ───────────────────────────────────────────────────────
+    # ── Direct per-activity peak W/kg from activities.csv ────────────────────
+    # GoldenCheetah exports *_peak_wpk columns (already W/kg, no weight needed).
+    # Use these directly; fall back to MMP-derived values when missing.
+    _acts_15s_cp  = (_col(acts, "15s_critical_power", default=np.nan).astype(float)
+                     if "15s_critical_power" in acts.columns
+                     else pd.Series([np.nan] * len(acts), index=acts.index))
+    _acts_1m_wpk  = (_col(acts, "1m_peak_wpk",  default=np.nan).astype(float)
+                     if "1m_peak_wpk"  in acts.columns
+                     else pd.Series([np.nan] * len(acts), index=acts.index))
+    _acts_5m_wpk  = (_col(acts, "5m_peak_wpk",  default=np.nan).astype(float)
+                     if "5m_peak_wpk"  in acts.columns
+                     else pd.Series([np.nan] * len(acts), index=acts.index))
+    _acts_20m_wpk = (_col(acts, "20m_peak_wpk", default=np.nan).astype(float)
+                     if "20m_peak_wpk" in acts.columns
+                     else pd.Series([np.nan] * len(acts), index=acts.index))
+    filled_1m  = _acts_1m_wpk.notna().mean()
+    filled_5m  = _acts_5m_wpk.notna().mean()
+    filled_20m = _acts_20m_wpk.notna().mean()
+    print(f"  Direct W/kg coverage: 1m={filled_1m*100:.0f}%  5m={filled_5m*100:.0f}%  20m={filled_20m*100:.0f}%")
+
+    # ── Merge MMP data (for 5s and fallback) ─────────────────────────────────
+    # MMP file uses numeric second column names: '5'=5s, '60'=1min, '300'=5min,
+    # '1200'=20min, '3600'=60min (values are watts, divide by weight for W/kg).
+    _MMP_SECS = {"5s": "5", "1m": "60", "5m": "300", "20m": "1200", "60m": "3600"}
+
     mmp_merged = None
     if mmp is not None:
-        # Find join key in MMP
         mmp_aid = _col(mmp, "athlete_id", "athlete", "id", "rider_id")
         mmp_date = _col(mmp, "date", "activity_date", "Date")
         if mmp_aid is not None and mmp_date is not None:
             mmp["_aid"] = mmp_aid.astype(str)
-            mmp["_date"] = pd.to_datetime(mmp_date, infer_datetime_format=True, errors="coerce")
+            mmp["_date"] = pd.to_datetime(mmp_date, errors="coerce")
+            # Deduplicate before join: keep first MMP entry per athlete+date
+            # (avoids row-count mismatch from many-to-many joins)
+            mmp_dedup = mmp.drop_duplicates(subset=["_aid", "_date"], keep="first")
             acts_key = acts[["_aid", "_date"]].copy()
-            mmp_merged = acts_key.merge(mmp, on=["_aid", "_date"], how="left")
+            mmp_merged = acts_key.merge(mmp_dedup, on=["_aid", "_date"], how="left")
 
     def _mmp_col(duration_label: str) -> pd.Series:
-        """Try to extract MMP at given duration from the merged MMP dataframe."""
+        """Return MMP series (in watts) for the given duration label."""
         if mmp_merged is None:
             return pd.Series([np.nan] * len(acts), index=acts.index)
         candidates = [duration_label, f"mmp_{duration_label}",
                       f"p{duration_label}", duration_label.replace("m", "min")]
+        # Numeric-seconds aliases: "5s"→"5", "1m"→"60", "5m"→"300", etc.
+        if duration_label in _MMP_SECS:
+            candidates.append(_MMP_SECS[duration_label])
         for c in candidates:
             if c in mmp_merged.columns:
-                return mmp_merged[c].astype(float).values
-            cl = c.lower()
-            match = [col for col in mmp_merged.columns if col.lower() == cl]
+                return pd.Series(mmp_merged[c].astype(float).values, index=acts.index)
+            match = [col for col in mmp_merged.columns if col.lower() == c.lower()]
             if match:
-                return mmp_merged[match[0]].astype(float).values
+                return pd.Series(mmp_merged[match[0]].astype(float).values, index=acts.index)
         return pd.Series([np.nan] * len(acts), index=acts.index)
 
     mmp_5s  = _mmp_col("5s")
@@ -253,6 +281,7 @@ def convert_summary(input_dir: Path, output: Path, min_rides: int = 20) -> pd.Da
     mmp_5m  = _mmp_col("5m")
     mmp_20m = _mmp_col("20m")
     mmp_60m = _mmp_col("60m")
+    print(f"  MMP coverage: 5s={mmp_5s.notna().mean()*100:.0f}%  1m={mmp_1m.notna().mean()*100:.0f}%  5m={mmp_5m.notna().mean()*100:.0f}%  20m={mmp_20m.notna().mean()*100:.0f}%")
 
     # ── Athlete metadata ─────────────────────────────────────────────────────
     ath_meta: dict[str, dict] = {}
@@ -307,6 +336,12 @@ def convert_summary(input_dir: Path, output: Path, min_rides: int = 20) -> pd.Da
         g_mmp5m  = np.asarray(mmp_5m.iloc[grp_idx]  if hasattr(mmp_5m,  "iloc") else [np.nan]*len(grp))
         g_mmp20m = np.asarray(mmp_20m.iloc[grp_idx] if hasattr(mmp_20m, "iloc") else [np.nan]*len(grp))
         g_mmp60m = np.asarray(mmp_60m.iloc[grp_idx] if hasattr(mmp_60m, "iloc") else [np.nan]*len(grp))
+
+        # Direct W/kg values from activities.csv (preferred over MMP-derived)
+        g_15s_cp  = np.asarray(_acts_15s_cp.iloc[grp_idx])
+        g_1m_wpk  = np.asarray(_acts_1m_wpk.iloc[grp_idx])
+        g_5m_wpk  = np.asarray(_acts_5m_wpk.iloc[grp_idx])
+        g_20m_wpk = np.asarray(_acts_20m_wpk.iloc[grp_idx])
 
         # FTP per ride: rolling best 60-min (or 20-min×0.95), expanded forward
         ftp_series = []
@@ -375,8 +410,11 @@ def convert_summary(input_dir: Path, output: Path, min_rides: int = 20) -> pd.Da
         pc5min_best = np.zeros(len(grp), dtype=np.float32)
         best_1m = best_5m = 0.0
         for i in range(len(grp)):
-            wkg_1m = g_mmp1m[i] / weight_kg if (not np.isnan(g_mmp1m[i]) and weight_kg > 0) else 0.0
-            wkg_5m = g_mmp5m[i] / weight_kg if (not np.isnan(g_mmp5m[i]) and weight_kg > 0) else 0.0
+            # Prefer direct W/kg from activities.csv; fall back to MMP watts / weight
+            wkg_1m = (float(g_1m_wpk[i]) if not np.isnan(g_1m_wpk[i]) and g_1m_wpk[i] > 0
+                      else (g_mmp1m[i] / weight_kg if (not np.isnan(g_mmp1m[i]) and weight_kg > 0) else 0.0))
+            wkg_5m = (float(g_5m_wpk[i]) if not np.isnan(g_5m_wpk[i]) and g_5m_wpk[i] > 0
+                      else (g_mmp5m[i] / weight_kg if (not np.isnan(g_mmp5m[i]) and weight_kg > 0) else 0.0))
             best_1m = max(best_1m, wkg_1m)
             best_5m = max(best_5m, wkg_5m)
             pc1min_best[i] = best_1m
@@ -392,10 +430,17 @@ def convert_summary(input_dir: Path, output: Path, min_rides: int = 20) -> pd.Da
             wt    = _infer_workout_type(if_v, dur_h, vi_v)
             zf    = _zone_fractions(wt)
 
-            wkg_5s  = g_mmp5s[i]  / weight_kg if (not np.isnan(g_mmp5s[i])  and weight_kg > 0) else 0.0
-            wkg_1m  = g_mmp1m[i]  / weight_kg if (not np.isnan(g_mmp1m[i])  and weight_kg > 0) else 0.0
-            wkg_5m  = g_mmp5m[i]  / weight_kg if (not np.isnan(g_mmp5m[i])  and weight_kg > 0) else 0.0
-            wkg_20m = g_mmp20m[i] / weight_kg if (not np.isnan(g_mmp20m[i]) and weight_kg > 0) else 0.0
+            # 5s: MMP file col '5' (watts) / weight, fallback 15s_critical_power / weight
+            _mmp5s_w = g_mmp5s[i] if not np.isnan(g_mmp5s[i]) else (
+                        g_15s_cp[i] if not np.isnan(g_15s_cp[i]) else np.nan)
+            wkg_5s  = float(_mmp5s_w / weight_kg) if (not np.isnan(_mmp5s_w) and weight_kg > 0) else 0.0
+            # 1m, 5m, 20m: prefer direct W/kg cols; fallback to MMP watts / weight
+            wkg_1m  = (float(g_1m_wpk[i])  if not np.isnan(g_1m_wpk[i])  and g_1m_wpk[i]  > 0
+                       else (g_mmp1m[i]  / weight_kg if (not np.isnan(g_mmp1m[i])  and weight_kg > 0) else 0.0))
+            wkg_5m  = (float(g_5m_wpk[i])  if not np.isnan(g_5m_wpk[i])  and g_5m_wpk[i]  > 0
+                       else (g_mmp5m[i]  / weight_kg if (not np.isnan(g_mmp5m[i])  and weight_kg > 0) else 0.0))
+            wkg_20m = (float(g_20m_wpk[i]) if not np.isnan(g_20m_wpk[i]) and g_20m_wpk[i] > 0
+                       else (g_mmp20m[i] / weight_kg if (not np.isnan(g_mmp20m[i]) and weight_kg > 0) else 0.0))
 
             rows.append({
                 "athlete_id":            str(aid_val),
@@ -462,8 +507,12 @@ def convert_summary(input_dir: Path, output: Path, min_rides: int = 20) -> pd.Da
             })
             n_athlete_rides += 1
 
-    print(f"  Converted {len(rows):,} rides from {len(set(r['athlete_id'] for r in rows))} athletes")
-    return pd.DataFrame(rows)
+    df = pd.DataFrame(rows)
+    # Encode string/UUID athlete_ids as sequential integers (CyclingDataset requires int)
+    uid_map = {uid: i for i, uid in enumerate(df["athlete_id"].unique())}
+    df["athlete_id"] = df["athlete_id"].map(uid_map)
+    print(f"  Converted {len(df):,} rides from {df['athlete_id'].nunique()} athletes")
+    return df
 
 
 # ── FORMAT B — raw per-second CSVs ────────────────────────────────────────────
