@@ -182,7 +182,7 @@ def convert_summary(input_dir: Path, output: Path, min_rides: int = 20) -> pd.Da
 
     # Core metrics
     dur_s  = _col(acts, "duration", "Duration", "total_time", "secs",
-                  "moving_time", "elapsed_time", default=0.0).astype(float)
+                  "moving_time", "elapsed_time", "workout_time", default=0.0).astype(float)
     dist_m = _col(acts, "distance", "Distance", "total_distance",
                   "km", default=0.0).astype(float)
     # Convert km → meters if values look like km (median < 500)
@@ -195,7 +195,7 @@ def convert_summary(input_dir: Path, output: Path, min_rides: int = 20) -> pd.Da
     avg_p  = _col(acts, "power", "average_power", "avg_power", "Average Power",
                   "power_avg", default=0.0).astype(float)
     np_p   = _col(acts, "normalized_power", "np", "NP", "Normalized Power",
-                  "power_np", default=None)
+                  "power_np", "coggan_np", default=None)
     if np_p is None:
         np_p = avg_p.copy()
     else:
@@ -212,13 +212,14 @@ def convert_summary(input_dir: Path, output: Path, min_rides: int = 20) -> pd.Da
     cad    = _col(acts, "avg_cadence", "cadence", "average_cadence", "Cadence",
                   default=85.0).astype(float)
 
-    tss_c  = _col(acts, "tss", "TSS", "training_stress_score",
+    tss_c  = _col(acts, "tss", "TSS", "training_stress_score", "coggan_tss",
                   default=None)
 
-    if_c   = _col(acts, "if", "intensity_factor", "IF",
+    if_c   = _col(acts, "if", "intensity_factor", "IF", "coggan_if",
                   default=None)
 
     vi_c   = _col(acts, "vi", "variability_index", "VI",
+                  "coggam_variability_index", "coggan_variability_index",
                   default=None)
 
     # ── Direct per-activity peak W/kg from activities.csv ────────────────────
@@ -235,6 +236,10 @@ def convert_summary(input_dir: Path, output: Path, min_rides: int = 20) -> pd.Da
                      else pd.Series([np.nan] * len(acts), index=acts.index))
     _acts_20m_wpk = (_col(acts, "20m_peak_wpk", default=np.nan).astype(float)
                      if "20m_peak_wpk" in acts.columns
+                     else pd.Series([np.nan] * len(acts), index=acts.index))
+    # 20m critical power in absolute watts (preferred for FTP test detection)
+    _acts_20m_cp  = (_col(acts, "20m_critical_power", default=np.nan).astype(float)
+                     if "20m_critical_power" in acts.columns
                      else pd.Series([np.nan] * len(acts), index=acts.index))
     filled_1m  = _acts_1m_wpk.notna().mean()
     filled_5m  = _acts_5m_wpk.notna().mean()
@@ -343,36 +348,76 @@ def convert_summary(input_dir: Path, output: Path, min_rides: int = 20) -> pd.Da
         g_5m_wpk  = np.asarray(_acts_5m_wpk.iloc[grp_idx])
         g_20m_wpk = np.asarray(_acts_20m_wpk.iloc[grp_idx])
 
-        # FTP per ride: rolling best 60-min (or 20-min×0.95), expanded forward
-        ftp_series = []
-        ftp_rolling = None
-        for i in range(len(grp)):
-            ride_ftp = _estimate_ftp(
-                g_mmp60m[i] if not np.isnan(g_mmp60m[i]) else None,
-                g_mmp20m[i] if not np.isnan(g_mmp20m[i]) else None,
-                g_mmp5m[i]  if not np.isnan(g_mmp5m[i])  else None,
+        # FTP: detect test rides (20m ≥ 95% personal best, VI steady 0.98–1.07, IF ≥ 0.93)
+        # then linearly interpolate between anchors; fallback to rolling MMP estimate.
+        _acts_20m_cp_g = np.asarray(_acts_20m_cp.iloc[grp_idx])
+        _ftp_if = (if_c.iloc[grp_idx].astype(float).values
+                   if if_c is not None else np.full(len(grp), np.nan))
+        _ftp_vi = (vi_c.iloc[grp_idx].astype(float).values
+                   if vi_c is not None else np.full(len(grp), np.nan))
+
+        # Best 20m watts: prefer 20m_critical_power → 20m_peak_wpk×weight → mmp_20m
+        _20m_w = np.where(
+            ~np.isnan(_acts_20m_cp_g) & (_acts_20m_cp_g > 0), _acts_20m_cp_g,
+            np.where(
+                ~np.isnan(g_20m_wpk) & (g_20m_wpk > 0) & (weight_kg > 0),
+                g_20m_wpk * weight_kg,
+                np.where(~np.isnan(g_mmp20m) & (g_mmp20m > 0), g_mmp20m, np.nan)
             )
-            if ride_ftp and ride_ftp > 80:
-                ftp_rolling = ride_ftp
-            ftp_series.append(ftp_rolling)
+        ).astype(np.float64)
 
-        # Backfill first rides with first known FTP
-        first_ftp = next((f for f in ftp_series if f), 200.0)
-        ftp_series = [f if f else first_ftp for f in ftp_series]
-        ftp_arr = np.array(ftp_series, dtype=np.float32)
+        # Expanding personal best 20m power
+        _pb20 = np.zeros(len(grp), dtype=np.float64)
+        _pb_best = 0.0
+        for i in range(len(grp)):
+            if not np.isnan(_20m_w[i]) and _20m_w[i] > _pb_best:
+                _pb_best = _20m_w[i]
+            _pb20[i] = _pb_best
 
-        # TSS — compute from NP + FTP if not in dataset
+        # FTP test: near-personal-best 20m effort with steady pacing and hard IF
+        is_test = (
+            (~np.isnan(_20m_w)) & (_pb20 > 80) & (_20m_w >= 0.95 * _pb20) &
+            (~np.isnan(_ftp_vi)) & (_ftp_vi >= 0.98) & (_ftp_vi <= 1.07) &
+            (~np.isnan(_ftp_if)) & (_ftp_if >= 0.93)
+        )
+        test_idx = np.where(is_test)[0]
+        ftp_at_test = _20m_w[test_idx] * 0.95
+
+        if len(test_idx) >= 2:
+            ftp_arr = np.interp(np.arange(len(grp)), test_idx, ftp_at_test).astype(np.float32)
+            ftp_arr[:test_idx[0]] = ftp_at_test[0]
+            ftp_arr[test_idx[-1] + 1:] = ftp_at_test[-1]
+        elif len(test_idx) == 1:
+            ftp_arr = np.full(len(grp), float(ftp_at_test[0]), dtype=np.float32)
+        else:
+            # Fallback: rolling best MMP estimate
+            ftp_rolling = None
+            ftp_list = []
+            for i in range(len(grp)):
+                ride_ftp = _estimate_ftp(
+                    g_mmp60m[i] if not np.isnan(g_mmp60m[i]) else None,
+                    g_mmp20m[i] if not np.isnan(g_mmp20m[i]) else None,
+                    g_mmp5m[i]  if not np.isnan(g_mmp5m[i])  else None,
+                )
+                if ride_ftp and ride_ftp > 80:
+                    ftp_rolling = ride_ftp
+                ftp_list.append(ftp_rolling)
+            first_ftp = next((f for f in ftp_list if f), 200.0)
+            ftp_arr = np.array([f if f else first_ftp for f in ftp_list], dtype=np.float32)
+
+        # TSS — compute from NP + FTP if not in dataset; cap at 600 (corrupted rows)
         tss_arr = tss_c.iloc[grp_idx].astype(float).values if tss_c is not None else np.full(len(grp), np.nan)
         for i in range(len(grp)):
             if np.isnan(tss_arr[i]) or tss_arr[i] == 0:
                 f = ftp_arr[i]
                 np_w = g_npp[i]
-                dur  = g_dur[i]
+                dur  = min(g_dur[i], 43200.0)   # cap at 12h; beyond that is corrupt
                 if f > 0 and np_w > 0 and dur > 0:
                     if_ = np_w / f
                     tss_arr[i] = (dur / 3600) * if_ * if_ * 100
                 else:
                     tss_arr[i] = 0.0
+            tss_arr[i] = min(float(tss_arr[i]), 600.0)   # sanity cap
 
         # IF
         if_arr = (if_c.iloc[grp_idx].astype(float).values
@@ -390,13 +435,16 @@ def convert_summary(input_dir: Path, output: Path, min_rides: int = 20) -> pd.Da
                 vi_arr[i] = g_npp[i] / g_avgp[i] if g_avgp[i] > 0 else 1.0
 
         # CTL / ATL / TSB
+        # Normalize timestamps to midnight — dates with time components (e.g.
+        # "2014-07-07 09:38") won't match the daily pd.date_range index otherwise.
         dates_arr = grp["_date"].values
-        fitness = _compute_fitness(pd.Series(tss_arr), pd.Series(pd.DatetimeIndex(dates_arr)))
+        dates_norm = pd.DatetimeIndex(dates_arr).normalize()
+        fitness = _compute_fitness(pd.Series(tss_arr), pd.Series(dates_norm))
 
         ctl_arr = np.array([fitness.loc[d, "ctl"] if d in fitness.index else 0.0
-                            for d in pd.DatetimeIndex(dates_arr)], dtype=np.float32)
+                            for d in dates_norm], dtype=np.float32)
         atl_arr = np.array([fitness.loc[d, "atl"] if d in fitness.index else 0.0
-                            for d in pd.DatetimeIndex(dates_arr)], dtype=np.float32)
+                            for d in dates_norm], dtype=np.float32)
         tsb_arr = ctl_arr - atl_arr
 
         # Days since last ride
@@ -496,9 +544,15 @@ def convert_summary(input_dir: Path, output: Path, min_rides: int = 20) -> pd.Da
                 # Rolling personal bests
                 "pc1min_capacity_wkg": float(pc1min_best[i]),
                 "pc5min_capacity_wkg": float(pc5min_best[i]),
-                # Risk labels — unknown for real data, use safe defaults
-                "risk_ot_class":     2,    # "neither" (no overtraining signal)
-                "risk_inj_target":   0.0,
+                # Risk: inferred from CTL/ATL/TSB patterns
+                # TSB < -30 → overtrained; TSB > 25 → undertrained; else → neither
+                "risk_ot_class":     (0 if float(tsb_arr[i]) < -30
+                                      else 1 if float(tsb_arr[i]) > 25
+                                      else 2),
+                # Injury risk: ramp rate + extreme fatigue
+                "risk_inj_target":   float(min(1.0, max(0.0,
+                    (float(atl_arr[i]) / max(float(ctl_arr[i]), 1.0) - 1.0) * 2.0
+                    + (0.3 if float(tsb_arr[i]) < -40 else 0.0)))),
                 # Health/recovery — not in dataset, use neutral defaults
                 "hrv_z":             0.0,
                 "rhr_delta":         0.0,
