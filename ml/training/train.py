@@ -69,12 +69,19 @@ def train(args):
     torch.set_num_threads(n_threads)
     print(f"PyTorch threads: {n_threads}")
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    if torch.cuda.is_available():
+        device = torch.device("cuda")
+    elif torch.backends.mps.is_available():
+        device = torch.device("mps")
+    else:
+        device = torch.device("cpu")
     n_gpus = torch.cuda.device_count() if device.type == "cuda" else 1
     print(f"Training on: {device}  ({n_gpus} GPU{'s' if n_gpus > 1 else ''})")
     if device.type == "cuda":
         for i in range(n_gpus):
             print(f"  GPU {i}: {torch.cuda.get_device_name(i)}  VRAM: {torch.cuda.get_device_properties(i).total_memory / 1e9:.1f} GB")
+    elif device.type == "mps":
+        print("  Apple Silicon GPU (MPS)")
 
     # ── Load data ─────────────────────────────────────────────────────────
     print(f"Loading data from {args.data}…")
