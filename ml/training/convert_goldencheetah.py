@@ -419,20 +419,24 @@ def convert_summary(input_dir: Path, output: Path, min_rides: int = 20) -> pd.Da
                     tss_arr[i] = 0.0
             tss_arr[i] = min(float(tss_arr[i]), 600.0)   # sanity cap
 
-        # IF
+        # IF — clamp to [0, 2.0]; outliers in coggan_if go up to 177 (corrupted rows)
         if_arr = (if_c.iloc[grp_idx].astype(float).values
                   if if_c is not None else np.full(len(grp), np.nan))
         for i in range(len(grp)):
-            if np.isnan(if_arr[i]) or if_arr[i] == 0:
+            if np.isnan(if_arr[i]) or if_arr[i] <= 0 or if_arr[i] > 2.0:
                 f = ftp_arr[i]
-                if_arr[i] = g_npp[i] / f if (f > 0 and g_npp[i] > 0) else 0.0
+                if_arr[i] = min(g_npp[i] / f, 2.0) if (f > 0 and g_npp[i] > 0) else 0.0
+            else:
+                if_arr[i] = min(if_arr[i], 2.0)
 
-        # VI
+        # VI — clamp to [1, 3]; GoldenCheetah has outliers up to 1194
         vi_arr = (vi_c.iloc[grp_idx].astype(float).values
                   if vi_c is not None else np.full(len(grp), np.nan))
         for i in range(len(grp)):
-            if np.isnan(vi_arr[i]) or vi_arr[i] < 1.0:
-                vi_arr[i] = g_npp[i] / g_avgp[i] if g_avgp[i] > 0 else 1.0
+            if np.isnan(vi_arr[i]) or vi_arr[i] < 1.0 or vi_arr[i] > 3.0:
+                vi_arr[i] = min(g_npp[i] / g_avgp[i], 3.0) if g_avgp[i] > 0 else 1.0
+            else:
+                vi_arr[i] = min(vi_arr[i], 3.0)
 
         # CTL / ATL / TSB
         # Normalize timestamps to midnight — dates with time components (e.g.
@@ -493,13 +497,13 @@ def convert_summary(input_dir: Path, output: Path, min_rides: int = 20) -> pd.Da
             rows.append({
                 "athlete_id":            str(aid_val),
                 "date":                  dates_arr[i],
-                # Activity
-                "duration_seconds":      float(g_dur[i]),
-                "distance_meters":       float(g_dist[i]),
-                "elevation_gain_meters": float(g_elev[i]),
-                "avg_power":             float(g_avgp[i]),
-                "normalized_power":      float(g_npp[i]),
-                "max_power":             float(g_maxp[i]),
+                # Activity — sanity caps: corrupt rows in GC CSV can have insane values
+                "duration_seconds":      min(float(g_dur[i]), 43200.0),   # cap 12h
+                "distance_meters":       min(float(g_dist[i]), 500000.0), # cap 500km
+                "elevation_gain_meters": min(float(g_elev[i]), 10000.0),  # cap 10km
+                "avg_power":             min(float(g_avgp[i]), 800.0),    # cap 800W
+                "normalized_power":      min(float(g_npp[i]), 800.0),     # cap 800W
+                "max_power":             min(float(g_maxp[i]), 2500.0),   # cap 2500W
                 "intensity_factor":      if_v,
                 "variability_index":     vi_v,
                 "tss":                   float(tss_arr[i]),
