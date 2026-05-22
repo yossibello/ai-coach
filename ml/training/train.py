@@ -46,6 +46,7 @@ from torch.optim.lr_scheduler import CosineAnnealingLR
 from torch.utils.data import DataLoader
 
 from app.ml.model import CyclingTransformer
+from app.ml.norm import ACTIVITY_WORKOUT_TYPE_DIMS, ACTIVITY_ZONE_DIMS
 from ml.training.dataset import CyclingDataset, athlete_split, collate_fn
 
 # Per-goal loss weights for [ftp_delta, pc5min_delta, pc1min_delta].
@@ -277,6 +278,9 @@ def train(args):
             hq  = batch.get("horizon_query")
             if hq is not None:
                 hq = hq.to(device)
+            if getattr(args, "mask_workout_type", False):
+                x[:, :, ACTIVITY_ZONE_DIMS]         = 0.0
+                x[:, :, ACTIVITY_WORKOUT_TYPE_DIMS] = 0.0
             tgt_wt   = batch["target_wt"].to(device)
             tgt_if   = batch["target_if"].to(device)
             tgt_dur  = batch["target_dur"].to(device)
@@ -368,6 +372,9 @@ def train(args):
                 hq  = batch.get("horizon_query")
                 if hq is not None:
                     hq = hq.to(device)
+                if getattr(args, "mask_workout_type", False):
+                    x[:, :, ACTIVITY_ZONE_DIMS]         = 0.0
+                    x[:, :, ACTIVITY_WORKOUT_TYPE_DIMS] = 0.0
                 tgt_wt   = batch["target_wt"].to(device)
                 tgt_if   = batch["target_if"].to(device)
                 tgt_dur  = batch["target_dur"].to(device)
@@ -499,5 +506,9 @@ if __name__ == "__main__":
                         help="Use torch.compile for extra GPU speed (PyTorch 2.0+)")
     parser.add_argument("--no-amp",     action="store_true",
                         help="Disable Automatic Mixed Precision even on GPU")
+    parser.add_argument("--mask-workout-type", action="store_true",
+                        help="Zero out workout_type one-hot (dims 32-42) and zone fractions "
+                             "(dims 17-23) in the activity input. Use when fine-tuning on real "
+                             "data where workout_type is inferred from IF/duration (circular).")
     args = parser.parse_args()
     train(args)

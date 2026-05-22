@@ -26,6 +26,14 @@ WORKOUT_TYPES: list[str] = [
 ]
 WORKOUT_TYPE_IDX: dict[str, int] = {n: i for i, n in enumerate(WORKOUT_TYPES)}
 
+# Positions within the ACTIVITY_DIM feature vector that carry workout_type and
+# zone fractions.  These are inferred from IF/duration in real data (circular),
+# so mask them out when fine-tuning on GoldenCheetah or any real-data parquet.
+# Dims 17-23 = z1..z7 (7 zone fraction dims)
+# Dims 32-42 = workout_type one-hot (11 dims)
+ACTIVITY_WORKOUT_TYPE_DIMS: slice = slice(32, 43)
+ACTIVITY_ZONE_DIMS:         slice = slice(17, 24)
+
 GOAL_TYPES: list[str] = [
     "general_fitness", "ftp_improvement", "weight_loss",
     "event_specific", "gran_fondo", "criterium",
