@@ -223,11 +223,9 @@ def train(args):
     # registers initial_lr in param groups so the fast-forward doesn't trigger
     # PyTorch's "called before optimizer.step()" warning.
     if start_epoch > 0:
-        if _resume_optimizer_state is None:
-            # Only do the dummy step when optimizer state wasn't loaded;
-            # if state was loaded, initial_lr is already in the param groups.
-            optimizer.zero_grad()
-            optimizer.step()
+        # Dummy step so PyTorch registers optimizer.step() before scheduler.step()
+        optimizer.zero_grad()
+        optimizer.step()
         for _ in range(start_epoch):
             scheduler.step()
     _amp_device = device.type if device.type in ("cuda", "cpu") else "cpu"
