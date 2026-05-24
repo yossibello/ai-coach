@@ -505,9 +505,11 @@ def train(args):
         }
         last_path = args.output.replace(".pt", "_last.pt")
         torch.save(last_ckpt, last_path)
+        print(f"  ✓ Last checkpoint → {last_path}")
         import shutil as _shutil
         try:
             _shutil.copy(last_path, "/kaggle/working/cycling_coach_last.pt")
+            print(f"  ✓ Backed up → /kaggle/working/cycling_coach_last.pt")
         except Exception:
             pass
 
