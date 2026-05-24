@@ -475,6 +475,42 @@ def train(args):
                 print(f"  Early stopping: val loss hasn't improved for {args.patience} epochs.")
                 break
 
+        # Always save a "last" checkpoint so resume picks up from the actual
+        # last epoch, not the best epoch.
+        raw_model = model
+        if hasattr(raw_model, "_orig_mod"):
+            raw_model = raw_model._orig_mod
+        if isinstance(raw_model, nn.DataParallel):
+            raw_model = raw_model.module
+        last_ckpt = {
+            "state_dict": raw_model.state_dict(),
+            "optimizer_state": optimizer.state_dict(),
+            "config": {
+                "input_dim": raw_model.input_proj[0].in_features,
+                "d_model": d_model,
+                "nhead": nhead,
+                "num_layers": num_layers,
+                "dim_feedforward": d_ff,
+                "dropout": args.dropout,
+                "horizon_dim": getattr(raw_model, "horizon_proj", None) and raw_model.horizon_proj[0].in_features,
+                "horizon_aware": True,
+            },
+            "metrics": {
+                "epoch": epoch,
+                "val_loss": avg_val,
+                "wt_acc": wt_acc,
+                "if_mae": if_mae,
+                "ftp_mae": ftp_mae,
+            },
+        }
+        last_path = args.output.replace(".pt", "_last.pt")
+        torch.save(last_ckpt, last_path)
+        import shutil as _shutil
+        try:
+            _shutil.copy(last_path, "/kaggle/working/cycling_coach_last.pt")
+        except Exception:
+            pass
+
     print(f"\nDone. Best val loss: {best_val_loss:.4f}")
 
 
