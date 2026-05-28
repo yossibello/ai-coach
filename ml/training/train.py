@@ -179,7 +179,18 @@ def train(args):
         ckpt = torch.load(args.checkpoint, map_location=device, weights_only=False)
         # Handle both raw state_dict and full checkpoint dict (current format).
         if isinstance(ckpt, dict) and "state_dict" in ckpt:
-            model.load_state_dict(ckpt["state_dict"])
+            # Strip _orig_mod. prefix if checkpoint was saved from a non-compiled
+            # model but we're now loading into a torch.compile-wrapped model,
+            # or vice versa.
+            sd = ckpt["state_dict"]
+            model_keys = set(model.state_dict().keys())
+            first_sd_key = next(iter(sd))
+            first_model_key = next(iter(model_keys))
+            if first_sd_key.startswith("_orig_mod.") and not first_model_key.startswith("_orig_mod."):
+                sd = {k[len("_orig_mod."):]: v for k, v in sd.items()}
+            elif not first_sd_key.startswith("_orig_mod.") and first_model_key.startswith("_orig_mod."):
+                sd = {"_orig_mod." + k: v for k, v in sd.items()}
+            model.load_state_dict(sd)
             saved_epoch = ckpt.get("metrics", {}).get("epoch", 0)
             # Resume only if mid-run (saved_epoch < total epochs).
             # If saved_epoch >= args.epochs it's a fine-tune: use weights only,
