@@ -627,6 +627,9 @@ def _transformer_recommendation(
         "key_metric": tmpl["key_metric"].format(
             z2_lo=int(ftp * 0.56), z2_hi=int(ftp * 0.75)
         ),
+        "projected_ctl": round(float(ctl), 1),
+        "projected_atl": round(float(atl), 1),
+        "projected_tsb": round(float(tsb), 1),
     }
 
     # Build 7-day plan — use the PHASE-APPROPRIATE schedule for this horizon
