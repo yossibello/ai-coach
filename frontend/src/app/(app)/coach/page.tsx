@@ -39,7 +39,8 @@ export default function CoachPage() {
     } catch {}
     return null;
   });
-  const setHorizon = (h: HorizonKey) => {
+  const setHorizon = (h: HorizonKey | null) => {
+    if (!h) return;
     try { localStorage.setItem("coach-horizon", h); } catch {}
     setHorizonOverride(h);
   };
@@ -312,7 +313,28 @@ function WorkoutCard({ plan, highlight, recId }: { plan: WorkoutPlan & { is_stre
             {plan.duration_minutes} min · TSS {plan.target_tss}
           </span>
         </div>
+        {/* Projected form indicator */}
+        {plan.projected_tsb !== undefined && (
+          <div className="text-right">
+            <span className={cn(
+              "text-xs font-semibold tabular-nums",
+              plan.projected_tsb > 5  ? "text-emerald-400" :
+              plan.projected_tsb < -20 ? "text-red-400" :
+              plan.projected_tsb < -10 ? "text-amber-400" :
+              "text-slate-400"
+            )}>
+              {plan.projected_tsb > 0 ? "+" : ""}{plan.projected_tsb.toFixed(0)}
+            </span>
+            <p className="text-xs text-slate-600">form</p>
+          </div>
+        )}
       </div>
+      {plan.projected_ctl !== undefined && (
+        <div className="flex gap-3 mb-3 text-xs text-slate-500">
+          <span>Fitness <span className="text-blue-400 font-medium">{plan.projected_ctl.toFixed(0)}</span></span>
+          <span>Fatigue <span className="text-orange-400 font-medium">{plan.projected_atl?.toFixed(0)}</span></span>
+        </div>
+      )}
       <p className="text-sm text-slate-400 mb-3 leading-relaxed">{plan.description}</p>
 
       {/* Intervals */}
@@ -639,7 +661,7 @@ function MacrocycleCard({
     if (!horizonPayload?.weekly_plan?.length) return null;
     const counts: Record<string, number> = {};
     for (const day of horizonPayload.weekly_plan) {
-      const wt = day.workout_type ?? "rest";
+      const wt: string = day.workout_type ?? "rest";
       if (wt !== "rest") counts[wt] = (counts[wt] ?? 0) + 1;
     }
     const top = Object.entries(counts).sort((a, b) => b[1] - a[1])[0];

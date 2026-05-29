@@ -95,6 +95,7 @@ export const stravaAPI = {
       confidence_high: number | null;
       method: string;
       best_ride_age_days: number | null;
+      last_test_age_days: number | null;
       tsb_correction: number;
       sample_count: number;
       trend: string;

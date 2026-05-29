@@ -207,6 +207,9 @@ export interface WorkoutPlan {
   target_tss: number;
   rationale: string;             // Why this workout
   key_metric: string;            // e.g. "Keep HR below 145 bpm"
+  projected_ctl?: number;        // Fitness going into this session
+  projected_atl?: number;        // Fatigue going into this session
+  projected_tsb?: number;        // Form going into this session
 }
 
 export interface WorkoutInterval {
