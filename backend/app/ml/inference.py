@@ -1193,6 +1193,20 @@ def _rollout_week(
             ),
         })
 
+    # Add per-day projected CTL/ATL/TSB rollout
+    _r_ctl, _r_atl = float(ctl), float(atl)
+    _day_tss_map = {w["day_offset"]: float(w.get("target_tss") or 0) for w in weekly_plan}
+    for _day in range(7):
+        _day_tss = _day_tss_map.get(_day, 0.0)
+        for w in weekly_plan:
+            if w["day_offset"] == _day:
+                w["projected_ctl"] = round(_r_ctl, 1)
+                w["projected_atl"] = round(_r_atl, 1)
+                w["projected_tsb"] = round(_r_ctl - _r_atl, 1)
+                break
+        _r_ctl = _r_ctl + (2 / 43) * (_day_tss - _r_ctl)
+        _r_atl = _r_atl + (2 / 8)  * (_day_tss - _r_atl)
+
     return weekly_plan
 
 
