@@ -176,7 +176,7 @@ export default function DashboardPage() {
       <div className="bg-surface-card border border-surface-border rounded-2xl p-6">
         <h2 className="font-semibold text-white mb-4">Performance Management Chart</h2>
         {fitness?.history ? (
-          <FitnessChart data={fitness.history} />
+          <FitnessChart data={fitness.history} healthDays={healthData?.days} />
         ) : (
           <div className="h-56 flex items-center justify-center text-slate-500 text-sm">
             No data yet — upload your first ride or sync Strava
