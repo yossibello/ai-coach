@@ -130,6 +130,10 @@ export function FitnessChart({ data, healthDays }: Props) {
       <ResponsiveContainer width="100%" height={260}>
         <ComposedChart data={formatted} margin={{ top: 4, right: 8, left: -16, bottom: 0 }}>
           <defs>
+            <linearGradient id="adjGrad" x1="0" y1="0" x2="0" y2="1">
+              <stop offset="5%"  stopColor="#c084fc" stopOpacity={0.3} />
+              <stop offset="95%" stopColor="#c084fc" stopOpacity={0} />
+            </linearGradient>
             <linearGradient id="ctlGrad" x1="0" y1="0" x2="0" y2="1">
               <stop offset="5%"  stopColor="#60a5fa" stopOpacity={0.3} />
               <stop offset="95%" stopColor="#60a5fa" stopOpacity={0} />
@@ -166,7 +170,7 @@ export function FitnessChart({ data, healthDays }: Props) {
             dataKey={showAdj ? "tsb_display" : "tsb"}
             name={showAdj ? "Form (health-adj)" : "TSB (Form)"}
             stroke={showAdj ? "#c084fc" : "#4ade80"}
-            fill={showAdj ? "none" : "url(#tsbGrad)"}
+            fill={showAdj ? "url(#adjGrad)" : "url(#tsbGrad)"}
             strokeWidth={1.5}
             dot={false}
             strokeDasharray="4 2"
