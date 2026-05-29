@@ -2,7 +2,7 @@ from fastapi import APIRouter
 
 from app.api.endpoints import (
     auth, activities, strava, garmin, recommendations, profile, fitness, nutrition,
-    tracking, health, oura, fitbit,
+    tracking, health, oura, fitbit, bugs,
 )
 
 api_router = APIRouter()
@@ -19,3 +19,4 @@ api_router.include_router(tracking.router,        prefix="/tracking",        tag
 api_router.include_router(health.router,          prefix="/health",          tags=["health"])
 api_router.include_router(oura.router,            prefix="/oura",            tags=["oura"])
 api_router.include_router(fitbit.router,          prefix="/fitbit",          tags=["fitbit"])
+api_router.include_router(bugs.router,            prefix="",                 tags=["bugs"])

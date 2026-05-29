@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
+import BugReportButton from "@/components/BugReportButton";
 import {
   LayoutDashboard,
   Brain,
@@ -95,6 +96,9 @@ export default function AppLayout({ children }: { children: React.ReactNode }) {
       <main className="md:ml-60 min-h-screen pt-14 md:pt-0 pb-20 md:pb-0">
         {children}
       </main>
+
+      {/* ── Bug report button (all pages) ─────────────────────────────────── */}
+      <BugReportButton />
 
       {/* ── Mobile bottom tab bar (below md) ──────────────────────────────── */}
       <nav className="md:hidden fixed bottom-0 left-0 right-0 bg-surface-card border-t border-surface-border z-40 flex">
