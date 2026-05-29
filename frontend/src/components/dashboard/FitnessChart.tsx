@@ -74,11 +74,15 @@ export function FitnessChart({ data, healthDays }: Props) {
   const formatted = data.map((d) => {
     const dateKey = d.date.slice(0, 10);
     const h = healthByDate.get(dateKey);
-    const adj = h != null ? +(d.tsb + healthModifier(h)).toFixed(1) : null;
+    const modifier = h != null ? healthModifier(h) : null;
+    const adj = modifier != null ? +(d.tsb + modifier).toFixed(1) : null;
     return {
       ...d,
-      date:    format(new Date(d.date), "MMM d"),
-      adj_tsb: adj,
+      date:        format(new Date(d.date), "MMM d"),
+      adj_tsb:     adj,
+      // When health toggle is on: use adjusted value where available, else original TSB
+      tsb_display: adj ?? d.tsb,
+      has_health:  adj != null,
     };
   });
 
@@ -136,30 +140,24 @@ export function FitnessChart({ data, healthDays }: Props) {
             wrapperStyle={{ fontSize: 12, color: "#94a3b8", paddingTop: 8 }}
             formatter={(val) => <span style={{ color: "#94a3b8" }}>{val}</span>}
           />
-          <Area type="monotone" dataKey="ctl" name="CTL (Fitness)"  stroke="#60a5fa" fill="url(#ctlGrad)" strokeWidth={2} dot={false} />
-          <Area type="monotone" dataKey="atl" name="ATL (Fatigue)"  stroke="#f87171" fill="url(#atlGrad)" strokeWidth={2} dot={false} />
-          <Area type="monotone" dataKey="tsb" name="TSB (Form)"     stroke="#4ade80" fill="url(#tsbGrad)" strokeWidth={1.5} dot={false} strokeDasharray="4 2" />
-          {showAdj && (
-            <Line
-              type="monotone"
-              dataKey="adj_tsb"
-              name="Adj. Form (health)"
-              stroke="#c084fc"
-              strokeWidth={2}
-              dot={(props: { cx: number; cy: number; value: number }) =>
-                props.value != null
-                  ? <circle key={`${props.cx}-${props.cy}`} cx={props.cx} cy={props.cy} r={5} fill="#c084fc" stroke="#1e1b4b" strokeWidth={1.5} />
-                  : <g key={`${props.cx}-${props.cy}`} />
-              }
-              strokeDasharray="6 3"
-              connectNulls={false}
-            />
-          )}
+          <Area type="monotone" dataKey="ctl" name="CTL (Fitness)" stroke="#60a5fa" fill="url(#ctlGrad)" strokeWidth={2} dot={false} />
+          <Area type="monotone" dataKey="atl" name="ATL (Fatigue)" stroke="#f87171" fill="url(#atlGrad)" strokeWidth={2} dot={false} />
+          {/* Form line — swaps to health-adjusted values when toggle is on */}
+          <Area
+            type="monotone"
+            dataKey={showAdj ? "tsb_display" : "tsb"}
+            name={showAdj ? "Form (health-adj)" : "TSB (Form)"}
+            stroke={showAdj ? "#c084fc" : "#4ade80"}
+            fill={showAdj ? "none" : "url(#tsbGrad)"}
+            strokeWidth={1.5}
+            dot={false}
+            strokeDasharray="4 2"
+          />
         </ComposedChart>
       </ResponsiveContainer>
       {showAdj && (
         <p className="text-xs text-slate-500 mt-1">
-          Purple dots = days with health data. Adj. Form = TSB shifted by HRV, sleep &amp; body battery.
+          Form line shifted by HRV, sleep &amp; body battery on {adjCount} days with health data.
         </p>
       )}
     </div>
