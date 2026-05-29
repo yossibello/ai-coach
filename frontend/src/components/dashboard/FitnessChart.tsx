@@ -82,7 +82,8 @@ export function FitnessChart({ data, healthDays }: Props) {
     };
   });
 
-  const hasAdjusted = formatted.some((d) => d.adj_tsb != null);
+  const adjCount = formatted.filter((d) => d.adj_tsb != null).length;
+  const hasAdjusted = adjCount > 0;
   const showAdj = hasAdjusted && showHealth;
 
   return (
@@ -100,6 +101,7 @@ export function FitnessChart({ data, healthDays }: Props) {
           >
             <Heart className="w-3 h-3" />
             Health-adjusted form
+            <span className="ml-1 opacity-60">({adjCount}d)</span>
           </button>
         </div>
       )}
@@ -144,7 +146,11 @@ export function FitnessChart({ data, healthDays }: Props) {
               name="Adj. Form (health)"
               stroke="#c084fc"
               strokeWidth={2}
-              dot={false}
+              dot={(props: { cx: number; cy: number; value: number }) =>
+                props.value != null
+                  ? <circle key={`${props.cx}-${props.cy}`} cx={props.cx} cy={props.cy} r={5} fill="#c084fc" stroke="#1e1b4b" strokeWidth={1.5} />
+                  : <g key={`${props.cx}-${props.cy}`} />
+              }
               strokeDasharray="6 3"
               connectNulls={false}
             />
@@ -153,7 +159,7 @@ export function FitnessChart({ data, healthDays }: Props) {
       </ResponsiveContainer>
       {showAdj && (
         <p className="text-xs text-slate-500 mt-1">
-          Adj. Form = TSB shifted by HRV, sleep &amp; body battery. Only shown on days with health data.
+          Purple dots = days with health data. Adj. Form = TSB shifted by HRV, sleep &amp; body battery.
         </p>
       )}
     </div>
