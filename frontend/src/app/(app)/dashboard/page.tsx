@@ -7,6 +7,8 @@ import { MetricCard } from "@/components/dashboard/MetricCard";
 import { RecentActivities } from "@/components/dashboard/RecentActivities";
 import { CoachTip } from "@/components/dashboard/CoachTip";
 import { HealthWidget } from "@/components/dashboard/HealthWidget";
+import HealthTrendsChart from "@/components/dashboard/HealthTrendsChart";
+import { healthAPI } from "@/lib/api";
 import { getTSBStatus, formatPower } from "@/lib/utils";
 import { TrendingUp, Zap, Heart, Activity, RefreshCw, Sparkles } from "lucide-react";
 import { toast } from "react-hot-toast";
@@ -27,6 +29,12 @@ export default function DashboardPage() {
   const { data: coach } = useQuery({
     queryKey: ["coach-recommendation"],
     queryFn: () => coachAPI.getRecommendation(),
+  });
+
+  const { data: healthData } = useQuery({
+    queryKey: ["health-recent-30"],
+    queryFn: () => healthAPI.recent(30),
+    staleTime: 5 * 60 * 1000,
   });
 
   const refreshRec = useMutation({
@@ -158,6 +166,11 @@ export default function DashboardPage() {
 
       {/* Recovery & Readiness (HRV / RHR / Sleep / Body Battery) */}
       <HealthWidget />
+
+      {/* Health trend charts */}
+      {healthData?.days && healthData.days.length > 0 && (
+        <HealthTrendsChart days={healthData.days} />
+      )}
 
       {/* PMC Chart */}
       <div className="bg-surface-card border border-surface-border rounded-2xl p-6">
