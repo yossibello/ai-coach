@@ -65,7 +65,9 @@ def _build_garmin_client(username: str, password: str, tokenstore: str | None = 
         msg = str(exc)
         if "TOO_MANY_REQUESTS" in msg or "429" in msg or "TooManyRequests" in type(exc).__name__:
             raise RuntimeError(
-                "Garmin Connect rate-limited this account. Wait 15–30 minutes then retry."
+                "Garmin Connect rate-limited this account. "
+                "This can last several hours — try again later. "
+                "If this keeps happening, log out of Garmin Connect on all devices and wait 1 hour."
             ) from exc
         if any(k in msg.lower() for k in ("auth", "invalid", "credentials", "password", "401", "403")):
             raise RuntimeError(
@@ -82,8 +84,27 @@ def _build_garmin_client(username: str, password: str, tokenstore: str | None = 
 async def connect_with_credentials(
     user: User, username: str, password: str, db: AsyncSession
 ) -> None:
-    """Validate credentials with Garmin Connect and persist (encrypted)."""
-    client = await asyncio.to_thread(_build_garmin_client, username, password)
+    """Validate credentials with Garmin Connect and persist (encrypted).
+
+    Tries the existing cached token first to avoid Garmin's aggressive
+    login rate-limiting. Falls back to password login only if needed.
+    """
+    client = None
+
+    # Reuse cached session if the username matches — avoids rate limit on /connect
+    if user.garmin_token_store and user.garmin_username == username:
+        tokenstore = decrypt_str(user.garmin_token_store)
+        if tokenstore:
+            try:
+                client = await asyncio.to_thread(_build_garmin_client, username, password, tokenstore)
+                log.info("Garmin re-connect: reused cached token for %s", username)
+            except Exception:
+                log.info("Garmin cached token invalid for %s, doing fresh login", username)
+                client = None
+
+    if client is None:
+        client = await asyncio.to_thread(_build_garmin_client, username, password)
+
     user.garmin_username = username
     user.garmin_password_enc = encrypt_str(password)
     user.garmin_user_id = str(getattr(client, "display_name", "") or username)
