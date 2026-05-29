@@ -49,10 +49,10 @@ const DAY_MS = 86_400_000;
 
 function buildTimeSeries(days: HealthDay[]) {
   if (!days.length) return [];
-  const byDate = new Map(days.map((d) => [d.date, d]));
-  const sorted = [...days].sort((a, b) => a.date.localeCompare(b.date));
-  const start = new Date(sorted[0].date).getTime();
-  const end   = new Date(sorted[sorted.length - 1].date).getTime();
+  const byDate = new Map(days.map((d) => [d.date.slice(0, 10), d]));
+  const sorted = [...days].sort((a, b) => a.date.slice(0, 10).localeCompare(b.date.slice(0, 10)));
+  const start = new Date(sorted[0].date.slice(0, 10)).getTime();
+  const end   = new Date(sorted[sorted.length - 1].date.slice(0, 10)).getTime();
   const rows = [];
   for (let t = start; t <= end; t += DAY_MS) {
     const key = new Date(t).toISOString().slice(0, 10);
