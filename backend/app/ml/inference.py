@@ -709,6 +709,24 @@ def _transformer_recommendation(
     except Exception:
         _planner_notes = []
 
+    # ── Per-day CTL/ATL/TSB rollout ──────────────────────────────────────────
+    # Roll fitness state forward through the week using each day's predicted
+    # TSS, so each workout shows the projected form going INTO that session
+    # rather than repeating today's snapshot for all 7 days.
+    # Rest days (not in weekly_plan) contribute TSS=0 (decay only).
+    _r_ctl, _r_atl = float(ctl), float(atl)
+    _day_tss_map = {w["day_offset"]: float(w.get("target_tss") or 0) for w in weekly_plan}
+    for _day in range(7):
+        _day_tss = _day_tss_map.get(_day, 0.0)
+        for w in weekly_plan:
+            if w["day_offset"] == _day:
+                w["projected_ctl"] = round(_r_ctl, 1)
+                w["projected_atl"] = round(_r_atl, 1)
+                w["projected_tsb"] = round(_r_ctl - _r_atl, 1)
+                break
+        _r_ctl = _r_ctl + (2 / 43) * (_day_tss - _r_ctl)
+        _r_atl = _r_atl + (2 / 8)  * (_day_tss - _r_atl)
+
     # Risks from transformer outputs.
     # Overtraining and undertraining are mutually exclusive: if overtraining
     # fires more strongly, suppress undertraining entirely (and vice versa).
