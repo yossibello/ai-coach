@@ -63,6 +63,11 @@ const CustomTooltip = ({ active, payload, label }: {
   );
 };
 
+// Decay rate per day: 0.75 → modifier halves in ~2.4 days, gone by ~10 days.
+// Mirrors typical physiological recovery from a bad night or hard block.
+const HEALTH_DECAY = 0.75;
+const HEALTH_MIN   = 0.3; // below this magnitude, snap to 0
+
 export function FitnessChart({ data, healthDays }: Props) {
   const [showHealth, setShowHealth] = useState(true);
 
@@ -71,22 +76,35 @@ export function FitnessChart({ data, healthDays }: Props) {
     (healthDays ?? []).map((h) => [h.date.slice(0, 10), h])
   );
 
-  const formatted = data.map((d) => {
-    const dateKey = d.date.slice(0, 10);
-    const h = healthByDate.get(dateKey);
-    const modifier = h != null ? healthModifier(h) : null;
-    const adj = modifier != null ? +(d.tsb + modifier).toFixed(1) : null;
+  // First pass: compute raw modifier for each day (null = no data)
+  const withModifier = data
+    .slice()
+    .sort((a, b) => a.date.localeCompare(b.date))
+    .map((d) => {
+      const h = healthByDate.get(d.date.slice(0, 10));
+      return { ...d, rawMod: h != null ? healthModifier(h) : null };
+    });
+
+  // Second pass: carry modifier forward with exponential decay on gap days
+  let prevMod = 0;
+  const formatted = withModifier.map((d) => {
+    let mod: number;
+    if (d.rawMod != null) {
+      mod = d.rawMod;          // anchor: real health measurement
+    } else {
+      mod = prevMod * HEALTH_DECAY;
+      if (Math.abs(mod) < HEALTH_MIN) mod = 0;
+    }
+    prevMod = mod;
     return {
       ...d,
       date:        format(new Date(d.date), "MMM d"),
-      adj_tsb:     adj,
-      // When health toggle is on: use adjusted value where available, else original TSB
-      tsb_display: adj ?? d.tsb,
-      has_health:  adj != null,
+      has_health:  d.rawMod != null,
+      tsb_display: +(d.tsb + mod).toFixed(1),
     };
   });
 
-  const adjCount = formatted.filter((d) => d.adj_tsb != null).length;
+  const adjCount = formatted.filter((d) => d.has_health).length;
   const hasAdjusted = adjCount > 0;
   const showAdj = hasAdjusted && showHealth;
 
