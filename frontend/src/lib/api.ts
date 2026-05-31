@@ -140,6 +140,9 @@ export const fitnessAPI = {
 
   recalculate: () =>
     api.post<{ task_id: string }>("/api/v1/fitness/recalculate").then((r) => r.data),
+
+  getCapabilities: () =>
+    api.get("/api/v1/fitness/capabilities").then((r) => r.data),
 };
 
 // ─── AI Coach ────────────────────────────────────────────────────────────────

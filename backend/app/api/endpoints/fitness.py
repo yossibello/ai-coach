@@ -98,3 +98,43 @@ async def recalculate_fitness(
 ):
     await compute_pmc_for_user(current_user.id, db)
     return {"status": "recalculated"}
+
+
+@router.get("/capabilities")
+async def get_capabilities(
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Return event capability tiers for the current athlete."""
+    from app.ml.capabilities import evaluate
+    from sqlalchemy import desc
+
+    # Load profile for FTP and weight
+    profile_res = await db.execute(
+        select(AthleteProfile).where(AthleteProfile.user_id == current_user.id)
+    )
+    profile = profile_res.scalar_one_or_none()
+
+    ftp_w      = (profile.ftp if profile and profile.ftp else 200) or 200
+    weight_kg  = (profile.weight_kg if profile and getattr(profile, "weight_kg", None) else 70) or 70
+    pc_5min    = getattr(profile, "pc5min_capacity_wkg", None)
+    pc_1min    = getattr(profile, "pc1min_capacity_wkg", None)
+
+    # Load latest CTL
+    metric_res = await db.execute(
+        select(FitnessMetric)
+        .where(FitnessMetric.user_id == current_user.id)
+        .order_by(desc(FitnessMetric.date)).limit(1)
+    )
+    metric = metric_res.scalar_one_or_none()
+    ctl = float(metric.ctl) if metric else 0.0
+
+    return {
+        "athlete": {
+            "ftp_w":     ftp_w,
+            "weight_kg": weight_kg,
+            "wkg":       round(ftp_w / max(weight_kg, 1), 2),
+            "ctl":       round(ctl, 1),
+        },
+        "events": evaluate(ftp_w, weight_kg, ctl, pc_5min_wkg=pc_5min, pc_1min_wkg=pc_1min),
+    }

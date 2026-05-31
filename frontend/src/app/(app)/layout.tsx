@@ -12,17 +12,19 @@ import {
   LogOut,
   Activity,
   FlaskConical,
+  Trophy,
 } from "lucide-react";
 import { authAPI } from "@/lib/api";
 import { cn } from "@/lib/utils";
 
 const NAV = [
-  { href: "/dashboard",  label: "Dashboard",   icon: LayoutDashboard },
-  { href: "/coach",      label: "AI Coach",    icon: Brain },
-  { href: "/activities", label: "Activities",  icon: Activity },
-  { href: "/nutrition",  label: "Nutrition",   icon: FlaskConical },
-  { href: "/upload",     label: "Upload",      icon: Upload },
-  { href: "/profile",    label: "Profile",     icon: User },
+  { href: "/dashboard",    label: "Dashboard",    icon: LayoutDashboard },
+  { href: "/coach",        label: "AI Coach",     icon: Brain },
+  { href: "/capabilities", label: "Capabilities", icon: Trophy },
+  { href: "/activities",   label: "Activities",   icon: Activity },
+  { href: "/nutrition",    label: "Nutrition",    icon: FlaskConical },
+  { href: "/upload",       label: "Upload",       icon: Upload },
+  { href: "/profile",      label: "Profile",      icon: User },
 ];
 
 export default function AppLayout({ children }: { children: React.ReactNode }) {
