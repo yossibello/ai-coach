@@ -33,11 +33,16 @@ MARKERS: dict[str, dict] = {
         "aliases": ["ferritin", "s-ferritin", "p-ferritin"],
         "unit": "ng/mL",
         "ref_low": 30, "ref_high": 400,
-        "athlete_optimal_low": 50, "athlete_optimal_high": 200,
+        # Athlete optimal: Burden et al. (2015) BJSM showed non-anaemic iron deficiency
+        # (ferritin 20-100 ng/mL) significantly impairs VO2max. Brownlie et al. (2002)
+        # demonstrated 10% VO2max improvement after iron supplementation in athletes with
+        # ferritin 16-75 ng/mL. Most elite endurance programs target >100 ng/mL.
+        "athlete_optimal_low": 100, "athlete_optimal_high": 300,
         "critical_low": 12, "critical_high": 1000,
         "sex_specific": {"female": (15, 200), "male": (30, 400)},
-        "performance_note": "Below 35 ng/mL = stage-2 iron deficiency, well-documented "
-                            "to impair endurance even without anemia (Sim 2019).",
+        "performance_note": "Endurance athletes need ferritin >100 ng/mL for optimal "
+                            "oxygen transport. Values 50-100 are 'normal' but sub-optimal "
+                            "for performance (Burden 2015, Brownlie 2002).",
     },
     "serum_iron": {
         "label": "Serum Iron",
@@ -94,10 +99,14 @@ MARKERS: dict[str, dict] = {
         "aliases": ["25-oh", "25(oh)d", "vitamin d", "vit d", "calcidiol", "25 hydroxy", "kalcidiol", "d-vitamin", "25-oh-vitamin d", "s-25-oh vitamin d"],
         "unit": "ng/mL",
         "ref_low": 30, "ref_high": 100,
-        "athlete_optimal_low": 30, "athlete_optimal_high": 80,
+        # Athlete optimal: AMSSM position stand recommends 40-60 ng/mL for athletes.
+        # Owens et al. (2018) BJSM meta-analysis: >50 ng/mL associated with lower
+        # injury rates, better muscle function and immune response in athletes.
+        "athlete_optimal_low": 50, "athlete_optimal_high": 80,
         "critical_low": 20, "critical_high": 150,
-        "performance_note": "<30 ng/mL is associated with impaired bone health, "
-                            "muscle function, and immunity (Owens 2018).",
+        "performance_note": "Athletes should target >50 ng/mL. Values 30-50 ng/mL are "
+                            "clinically sufficient but associated with higher injury risk "
+                            "and reduced muscle function (Owens 2018, AMSSM).",
     },
 
     # ─── B-vitamins ──────────────────────────────────────────────────────────

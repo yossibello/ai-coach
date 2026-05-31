@@ -299,6 +299,9 @@ export interface BloodMarkerValue {
   unit: string;
   ref_low: number;
   ref_high: number;
+  athlete_optimal_low?: number | null;
+  athlete_optimal_high?: number | null;
+  performance_note?: string | null;
   status:
     | "critical_low" | "low" | "suboptimal" | "optimal" | "high" | "critical_high" | "unknown";
   label: string;

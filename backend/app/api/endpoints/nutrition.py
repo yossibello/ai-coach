@@ -141,13 +141,16 @@ async def upload_blood_test_manual(
         if sex and "sex_specific" in m_def and sex.lower() in m_def["sex_specific"]:
             ref_low, ref_high = m_def["sex_specific"][sex.lower()]
         markers_dict[m.marker_key] = {
-            "value":    round(v_norm, 4),
-            "unit":     u_norm,
-            "ref_low":  ref_low,
-            "ref_high": ref_high,
-            "status":   status_for_value(m.marker_key, v_norm, sex),
-            "label":    m_def["label"],
-            "category": m_def["category"],
+            "value":                round(v_norm, 4),
+            "unit":                 u_norm,
+            "ref_low":              ref_low,
+            "ref_high":             ref_high,
+            "athlete_optimal_low":  m_def.get("athlete_optimal_low"),
+            "athlete_optimal_high": m_def.get("athlete_optimal_high"),
+            "status":               status_for_value(m.marker_key, v_norm, sex),
+            "label":                m_def["label"],
+            "category":             m_def["category"],
+            "performance_note":     m_def.get("performance_note"),
         }
 
     if not markers_dict:
@@ -221,10 +224,14 @@ async def marker_time_series(
         .order_by(asc(BloodMarker.test_date))
     )
     rows = res.scalars().all()
+    m_def = MARKERS[marker_key]
     return {
-        "marker_key": marker_key,
-        "label":      MARKERS[marker_key]["label"],
-        "unit":       MARKERS[marker_key]["unit"],
+        "marker_key":           marker_key,
+        "label":                m_def["label"],
+        "unit":                 m_def["unit"],
+        "athlete_optimal_low":  m_def.get("athlete_optimal_low"),
+        "athlete_optimal_high": m_def.get("athlete_optimal_high"),
+        "performance_note":     m_def.get("performance_note"),
         "points":     [
             {
                 "test_date": r.test_date.isoformat(),

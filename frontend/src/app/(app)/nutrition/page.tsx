@@ -648,20 +648,41 @@ function MarkerChip({
   marker: BloodTest["markers"][string];
 }) {
   const color = statusColor(marker.status);
+  const isSuboptimal = marker.status === "suboptimal";
+  const hasAthleteRange = marker.athlete_optimal_low != null && marker.athlete_optimal_high != null;
+
   return (
-    <div className="p-2.5 rounded-md bg-surface-muted border border-surface-border">
+    <div className={cn(
+      "p-2.5 rounded-md border",
+      isSuboptimal
+        ? "bg-amber-500/5 border-amber-500/20"
+        : "bg-surface-muted border-surface-border"
+    )}>
       <div className="flex items-center justify-between gap-2">
         <span className="text-xs text-slate-400 truncate">{marker.label}</span>
         <span className={cn("text-[9px] uppercase font-bold", color)}>
-          {marker.status.replace("_", " ")}
+          {isSuboptimal ? "↓ athlete" : marker.status.replace("_", " ")}
         </span>
       </div>
-      <div className="mt-1 text-sm text-white">
-        {marker.value} <span className="text-xs text-slate-500">{marker.unit}</span>
+      <div className="mt-1 text-sm text-white font-semibold">
+        {marker.value} <span className="text-xs text-slate-500 font-normal">{marker.unit}</span>
       </div>
-      <div className="text-[10px] text-slate-500 mt-0.5">
-        ref {marker.ref_low}–{marker.ref_high}
+      {/* Clinical range */}
+      <div className="text-[10px] text-slate-500 mt-1">
+        Clinical: {marker.ref_low}–{marker.ref_high}
       </div>
+      {/* Athlete optimal range */}
+      {hasAthleteRange && (
+        <div className={cn("text-[10px] mt-0.5", isSuboptimal ? "text-amber-400" : "text-emerald-600")}>
+          Athlete target: {marker.athlete_optimal_low}–{marker.athlete_optimal_high}
+        </div>
+      )}
+      {/* Performance note for suboptimal */}
+      {isSuboptimal && marker.performance_note && (
+        <p className="text-[10px] text-amber-300/70 mt-1 leading-relaxed line-clamp-2">
+          {marker.performance_note}
+        </p>
+      )}
     </div>
   );
 }
