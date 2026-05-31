@@ -2,6 +2,7 @@
 
 import type { LucideIcon } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { MetricExplainer } from "./MetricExplainer";
 
 interface Props {
   icon: LucideIcon;
@@ -11,9 +12,11 @@ interface Props {
   color: string;
   detail?: string;
   confidence?: number; // 0–1
+  explainer?: "FTP" | "CTL" | "ATL" | "TSB" | "TSS";
+  numericValue?: number;
 }
 
-export function MetricCard({ icon: Icon, label, value, sub, color, detail, confidence }: Props) {
+export function MetricCard({ icon: Icon, label, value, sub, color, detail, confidence, explainer, numericValue }: Props) {
   const confPct = confidence != null ? Math.round(confidence * 100) : null;
   const confColor =
     confPct == null ? "" :
@@ -23,7 +26,10 @@ export function MetricCard({ icon: Icon, label, value, sub, color, detail, confi
   return (
     <div className="bg-surface-card border border-surface-border rounded-2xl p-5 hover:border-brand-500/30 transition-colors">
       <div className="flex items-center justify-between mb-3">
-        <span className="text-xs font-medium text-slate-400 uppercase tracking-wider">{label}</span>
+        <div className="flex items-center gap-1.5">
+          <span className="text-xs font-medium text-slate-400 uppercase tracking-wider">{label}</span>
+          {explainer && <MetricExplainer metric={explainer} currentValue={numericValue} />}
+        </div>
         <Icon className={cn("w-4 h-4", color)} />
       </div>
       <div className={cn("text-2xl font-bold mb-1", color)}>{value}</div>

@@ -137,6 +137,8 @@ export default function DashboardPage() {
           detail={ftpDetail}
           confidence={ftpConfidence}
           color="text-brand-400"
+          explainer="FTP"
+          numericValue={current?.ftp}
         />
         <MetricCard
           icon={TrendingUp}
@@ -144,6 +146,8 @@ export default function DashboardPage() {
           value={current ? `${Math.round(current.ctl)}` : "—"}
           sub={`ATL ${current ? Math.round(current.atl) : "—"} · 42-day load`}
           color="text-blue-400"
+          explainer="CTL"
+          numericValue={current?.ctl}
         />
         <MetricCard
           icon={Activity}
@@ -151,6 +155,8 @@ export default function DashboardPage() {
           value={current ? `${Math.round(current.tsb) > 0 ? "+" : ""}${Math.round(current.tsb)}` : "—"}
           sub={tsbStatus?.label ?? "Training Stress Balance"}
           color={tsbStatus?.color ?? "text-slate-400"}
+          explainer="TSB"
+          numericValue={current?.tsb}
         />
         <MetricCard
           icon={Heart}
@@ -158,6 +164,8 @@ export default function DashboardPage() {
           value={current ? `${Math.round(current.tss)}` : "0"}
           sub="Training Stress Score"
           color="text-pink-400"
+          explainer="TSS"
+          numericValue={current?.tss}
         />
       </div>
 
