@@ -698,6 +698,7 @@ const TRENDABLE_MARKERS = [
   { key: "crp", label: "CRP" },
   { key: "hba1c", label: "HbA1c" },
   { key: "ck", label: "Creatine Kinase" },
+  { key: "homocysteine", label: "Homocysteine" },
 ];
 
 function TrendsTab() {
