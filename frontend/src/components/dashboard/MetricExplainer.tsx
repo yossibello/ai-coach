@@ -1,7 +1,6 @@
 "use client";
 
-import { useState } from "react";
-import { X, HelpCircle } from "lucide-react";
+import { X } from "lucide-react";
 import { cn } from "@/lib/utils";
 
 interface Zone {
@@ -102,26 +101,19 @@ const METRICS: Record<string, MetricInfo> = {
 interface Props {
   metric: keyof typeof METRICS;
   currentValue?: number;
+  open: boolean;
+  onClose: () => void;
 }
 
-export function MetricExplainer({ metric, currentValue }: Props) {
-  const [open, setOpen] = useState(false);
+export function MetricExplainer({ metric, currentValue, open, onClose }: Props) {
   const info = METRICS[metric];
-  if (!info) return null;
+  if (!info || !open) return null;
 
   return (
     <>
-      <button
-        onClick={(e) => { e.stopPropagation(); setOpen(true); }}
-        className="inline-flex items-center justify-center w-4 h-4 rounded-full text-slate-600 hover:text-slate-400 transition-colors"
-        title={`What is ${metric}?`}
-      >
-        <HelpCircle className="w-3.5 h-3.5" />
-      </button>
-
       {open && (
-        <div className="fixed inset-0 z-[70] flex items-center justify-center p-4" onClick={() => setOpen(false)}>
-          <div className="absolute inset-0 bg-black/70 backdrop-blur-sm" />
+        <div className="fixed inset-0 z-[70] flex items-center justify-center p-4" onClick={onClose}>
+          <div className="absolute inset-0 bg-black/70 backdrop-blur-sm" onClick={onClose} />
           <div
             className="relative w-full max-w-lg bg-surface-card border border-surface-border rounded-2xl shadow-2xl overflow-hidden"
             onClick={(e) => e.stopPropagation()}
@@ -133,7 +125,7 @@ export function MetricExplainer({ metric, currentValue }: Props) {
                 <h2 className="font-bold text-white text-sm">{info.name}</h2>
                 <p className="text-xs text-brand-400 font-medium mt-0.5">{info.tagline}</p>
               </div>
-              <button onClick={() => setOpen(false)} className="text-slate-500 hover:text-white mt-1">
+              <button onClick={onClose} className="text-slate-500 hover:text-white mt-1">
                 <X className="w-4 h-4" />
               </button>
             </div>
