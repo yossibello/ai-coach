@@ -873,10 +873,14 @@ def _apply_today_ride_guard(payload: dict, activities: list) -> dict:
     if not today_acts or (today_tss < 30 and today_dur_min < 45):
         return payload
 
-    # Shift every workout in the plan forward by one day.
+    # Shift every workout in the plan forward by one day, capped at day 13
+    # (two-week lookahead max). Without the cap, Day 6 shifts to Day 7 which
+    # renders as an 8th day — outside the weekly plan window.
     weekly_plan = [dict(w) for w in payload.get("weekly_plan", [])]
     for w in weekly_plan:
-        w["day_offset"] = w.get("day_offset", 0) + 1
+        w["day_offset"] = min(w.get("day_offset", 0) + 1, 13)
+    # Drop any sessions that fall beyond day 6 (next 7 days) to keep the UI clean
+    weekly_plan = [w for w in weekly_plan if w["day_offset"] <= 6]
     payload["weekly_plan"] = weekly_plan
 
     # Annotate next_workout (which is weekly_plan[0]) with the reason.
