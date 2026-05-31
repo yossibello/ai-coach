@@ -153,7 +153,7 @@ export function MetricExplainer({ metric, currentValue, open, onClose }: Props) 
                 <p className="text-xs font-medium text-slate-400 uppercase tracking-wider mb-2">Ranges</p>
                 <div className="space-y-2">
                   {info.zones.map((z) => {
-                    const isCurrent = currentValue != null && isInZone(z, currentValue, metric);
+                    const isCurrent = currentValue != null && isInZone(z, currentValue);
                     return (
                       <div
                         key={z.label}
@@ -189,15 +189,16 @@ export function MetricExplainer({ metric, currentValue, open, onClose }: Props) 
   );
 }
 
-function isInZone(zone: Zone, value: number, metric: string): boolean {
+function toNum(s: string): number {
+  // normalise Unicode minus (−) and en-dash to ASCII hyphen before parseFloat
+  return parseFloat(s.replace(/[−–]/g, "-").replace(/[^-\d.]/g, ""));
+}
+
+function isInZone(zone: Zone, value: number): boolean {
   const r = zone.range;
-  if (r.startsWith("<"))  return value < parseFloat(r.slice(1));
-  if (r.startsWith(">"))  return value > parseFloat(r.slice(1));
-  const parts = r.split(/\s*(?:to|–)\s*/);
-  if (parts.length === 2) {
-    const lo = parseFloat(parts[0].replace(/[^-\d.]/g, ""));
-    const hi = parseFloat(parts[1].replace(/[^-\d.]/g, ""));
-    return value >= lo && value <= hi;
-  }
+  if (r.startsWith("<"))  return value < toNum(r.slice(1));
+  if (r.startsWith(">"))  return value > toNum(r.slice(1));
+  const parts = r.split(/\s*(?:to|–|−)\s*/);
+  if (parts.length === 2) return value >= toNum(parts[0]) && value <= toNum(parts[1]);
   return false;
 }
