@@ -250,11 +250,14 @@ def evaluate(
         est_speed     = None
         est_time_h    = None
 
+        # For flat_speed events, show the GOLD tier required speed (what the event demands)
+        if ev["type"] == "flat_speed":
+            est_speed = ev["tiers"][0]["min_flat_kmh"]  # gold threshold = event benchmark speed
+
         for tier in ev["tiers"]:
             achieved = False
 
             if ev["type"] == "flat_speed":
-                est_speed = flat_spd
                 achieved = (flat_spd >= tier["min_flat_kmh"]
                             and ctl >= tier["min_ctl"])
 
@@ -300,22 +303,23 @@ def evaluate(
         )
 
         results.append({
-            "id":           ev["id"],
-            "name":         ev["name"],
-            "category":     ev["category"],
-            "icon":         ev["icon"],
-            "description":  ev["description"],
-            "distance_km":  ev.get("distance_km"),
-            "elevation_m":  ev.get("elevation_m"),
-            "tier":         tier_achieved["label"]   if tier_achieved else None,
-            "tier_emoji":   tier_achieved["emoji"]   if tier_achieved else "—",
-            "tier_name":    tier_achieved["name"]    if tier_achieved else "Not ready yet",
-            "next_tier":    next_tier["label"]       if next_tier else None,
-            "next_tier_name": next_tier["name"]      if next_tier else None,
-            "est_speed_kmh": est_speed,
-            "est_time_h":    est_time_h,
-            "athlete_wkg":   round(wkg, 2),
-            "athlete_flat_kmh": flat_spd,
+            "id":                ev["id"],
+            "name":              ev["name"],
+            "category":          ev["category"],
+            "icon":              ev["icon"],
+            "description":       ev["description"],
+            "distance_km":       ev.get("distance_km"),
+            "elevation_m":       ev.get("elevation_m"),
+            "tier":              tier_achieved["label"]   if tier_achieved else None,
+            "tier_emoji":        tier_achieved["emoji"]   if tier_achieved else "—",
+            "tier_name":         tier_achieved["name"]    if tier_achieved else "Not ready yet",
+            "next_tier":         next_tier["label"]       if next_tier else None,
+            "next_tier_name":    next_tier["name"]        if next_tier else None,
+            "event_speed_kmh":   est_speed,      # what the event demands (gold benchmark)
+            "athlete_speed_kmh": flat_spd,       # what the athlete can sustain
+            "est_time_h":        est_time_h,
+            "athlete_wkg":       round(wkg, 2),
+            "athlete_flat_kmh":  flat_spd,
             "athlete_max_dur_h": max_dur,
         })
 

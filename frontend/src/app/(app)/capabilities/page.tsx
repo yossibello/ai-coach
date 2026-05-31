@@ -31,7 +31,8 @@ interface Event {
   tier_name: string;
   next_tier: string | null;
   next_tier_name: string | null;
-  est_speed_kmh: number | null;
+  event_speed_kmh: number | null;   // what gold demands
+  athlete_speed_kmh: number | null; // what the athlete can do
   est_time_h: number | null;
   athlete_wkg: number;
   athlete_flat_kmh: number;
@@ -90,14 +91,22 @@ function EventCard({ ev }: { ev: Event }) {
       </div>
 
       {/* Event stats */}
-      {(ev.distance_km || ev.elevation_m) && (
-        <div className="flex gap-3 text-xs text-slate-500">
-          {ev.distance_km && <span>📍 {ev.distance_km}km</span>}
-          {ev.elevation_m && <span>⬆️ {ev.elevation_m.toLocaleString()}m</span>}
-          {ev.est_time_h  && <span>⏱ est. {formatTime(ev.est_time_h)}</span>}
-          {ev.est_speed_kmh && <span>💨 {ev.est_speed_kmh} km/h</span>}
-        </div>
-      )}
+      <div className="flex flex-wrap gap-3 text-xs text-slate-500">
+        {ev.distance_km && <span>📍 {ev.distance_km}km</span>}
+        {ev.elevation_m && <span>⬆️ {ev.elevation_m.toLocaleString()}m</span>}
+        {ev.est_time_h  && <span>⏱ est. {formatTime(ev.est_time_h)}</span>}
+        {ev.event_speed_kmh && (
+          <span>🏁 needs {ev.event_speed_kmh} km/h</span>
+        )}
+        {ev.athlete_speed_kmh && ev.category === "group_ride" && (
+          <span className={cn(
+            "font-medium",
+            ev.athlete_speed_kmh >= (ev.event_speed_kmh ?? 0) ? "text-emerald-400" : "text-amber-400"
+          )}>
+            you: {ev.athlete_speed_kmh} km/h
+          </span>
+        )}
+      </div>
 
       {/* Achievement */}
       <div className={cn(
