@@ -198,7 +198,8 @@ function isInZone(zone: Zone, value: number): boolean {
   const r = zone.range;
   if (r.startsWith("<"))  return value < toNum(r.slice(1));
   if (r.startsWith(">"))  return value > toNum(r.slice(1));
-  const parts = r.split(/\s*(?:to|–|−)\s*/);
+  // Split only on " to " — do NOT split on minus signs inside numbers
+  const parts = r.split(/\s+to\s+/);
   if (parts.length === 2) return value >= toNum(parts[0]) && value <= toNum(parts[1]);
   return false;
 }
