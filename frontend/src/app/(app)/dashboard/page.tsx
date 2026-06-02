@@ -34,7 +34,7 @@ export default function DashboardPage() {
   const { data: healthData } = useQuery({
     queryKey: ["health-recent-30"],
     queryFn: () => healthAPI.recent(30),
-    staleTime: 5 * 60 * 1000,
+    staleTime: 0,
   });
 
   const refreshRec = useMutation({

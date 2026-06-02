@@ -146,7 +146,7 @@ export default function CapabilitiesPage() {
   const { data, isLoading } = useQuery<CapabilityData>({
     queryKey: ["capabilities"],
     queryFn:  () => fitnessAPI.getCapabilities(),
-    staleTime: 10 * 60 * 1000,
+    staleTime: 0,
   });
 
   const categories = ["group_ride", "gran_fondo", "gravel", "ultra"];
