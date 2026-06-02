@@ -121,9 +121,20 @@ def _score_and_tag(activity: Activity, user: User | None) -> None:
 
 
 def _classify_workout(if_: float, duration_s: int) -> str:
-    """Classify workout type from Intensity Factor."""
+    """Classify workout type from Intensity Factor and duration.
+
+    Duration matters at low intensity: a 10-min spin is recovery;
+    a 4-hour ride at the same IF is endurance or long_ride.
+    Recovery rides are short by definition (Friel: ≤45 min).
+    """
     if if_ < 0.55:
-        return "recovery"
+        if duration_s < 2700:    # < 45 min → genuine recovery spin
+            return "recovery"
+        if duration_s < 7200:    # 45 min – 2 h → easy aerobic
+            return "easy"
+        if duration_s < 14400:   # 2 h – 4 h → endurance
+            return "endurance"
+        return "long_ride"       # > 4 h at low IF → long endurance ride
     if if_ < 0.75:
         return "easy" if duration_s < 5400 else "endurance"
     if if_ < 0.88:
