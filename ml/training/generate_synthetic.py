@@ -775,6 +775,9 @@ def _simulate_ride(
         # identification / target labels
         "athlete_id":            athlete.athlete_id,
         "philosophy":            athlete.philosophy,
+        # Provenance: drives policy outcome-weighting in training. Synthetic =
+        # expert prescription, always imitated (weight 1.0). See dataset.py.
+        "source":                "synthetic",
         "date":                  date,
         "workout_type":          wt,
         # session

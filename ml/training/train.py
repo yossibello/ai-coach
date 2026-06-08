@@ -24,12 +24,24 @@ Usage:
       --output ./backend/models/cycling_coach_fast.pt \\
       --fast --epochs 20
 
-  # Fine-tune on real athlete data:
+  # Fine-tune on real athlete data (RECOMMENDED pattern):
+  #   • mix synthetic REPLAY in to anchor the coaching policy (no forgetting)
+  #   • tag provenance so policy heads outcome-weight the real data automatically
+  #   • mask the circular workout-type/zone INPUT features on real data
   python -m ml.training.train \\
-      --data ./ml/data/activities.parquet \\
-      --output ./backend/models/cycling_coach.pt \\
+      --data "./ml/data/synthetic.parquet=synthetic,./ml/data/goldencheetah.parquet=real" \\
+      --output ./backend/models/cycling_coach_ft.pt \\
       --checkpoint ./backend/models/cycling_coach.pt \\
+      --mask-workout-type \\
       --epochs 30 --lr 5e-5
+
+Two head families, two truth sources (see README / dataset.py):
+  • POLICY   heads (workout_type, intensity, duration) learn WHAT TO PRESCRIBE.
+    On real data they are outcome-weighted — the model imitates only the riders
+    who actually got faster, never the amateur average. Synthetic = weight 1.0.
+  • FORECAST heads (ftp/pc deltas, risk) learn WHAT THE BODY DOES. They train on
+    ALL data unweighted — declines and overtraining are the negative examples
+    the physiology model needs to predict and warn about.
 """
 from __future__ import annotations
 
@@ -85,9 +97,45 @@ def train(args):
         print("  Apple Silicon GPU (MPS)")
 
     # ── Load data ─────────────────────────────────────────────────────────
-    print(f"Loading data from {args.data}…")
-    df = pd.read_parquet(args.data) if args.data.endswith(".parquet") else pd.read_csv(args.data)
-    print(f"Total rows: {len(df):,}  athletes: {df['athlete_id'].nunique():,}")
+    # `--data` accepts a comma-separated list of sources, each optionally tagged
+    # with its provenance via `path=source` (source ∈ {synthetic, real}). This
+    # is how synthetic REPLAY is mixed into a real-data fine-tune in one run:
+    #     --data "synthetic.parquet=synthetic,goldencheetah.parquet=real"
+    # Provenance drives per-sample policy weighting in the dataset: synthetic
+    # prescriptions are always imitated; real ones only when the rider improved.
+    # When a path has no `=source` tag, the file's own `source` column is used
+    # (defaulting to synthetic). Athlete IDs are namespaced across files so an
+    # id collision between two sources never merges two different athletes.
+    def _read_one(path: str) -> pd.DataFrame:
+        return pd.read_parquet(path) if path.endswith(".parquet") else pd.read_csv(path)
+
+    _parts = []
+    _id_offset = 0
+    for _item in args.data.split(","):
+        _item = _item.strip()
+        if not _item:
+            continue
+        if "=" in _item:
+            _path, _src = _item.rsplit("=", 1)
+            _path, _src = _path.strip(), _src.strip()
+        else:
+            _path, _src = _item, None
+        print(f"Loading data from {_path}…" + (f"  (source={_src})" if _src else ""))
+        _d = _read_one(_path)
+        if _src is not None:
+            _d["source"] = _src
+        elif "source" not in _d.columns:
+            _d["source"] = "synthetic"
+        # Namespace athlete ids so disjoint sources never collide.
+        _d["athlete_id"] = _d["athlete_id"].astype("int64") + _id_offset
+        _id_offset = int(_d["athlete_id"].max()) + 1
+        _parts.append(_d)
+
+    df = _parts[0] if len(_parts) == 1 else pd.concat(_parts, ignore_index=True)
+    del _parts
+    _src_counts = df["source"].value_counts().to_dict()
+    print(f"Total rows: {len(df):,}  athletes: {df['athlete_id'].nunique():,}  "
+          f"by source: {_src_counts}")
 
     # ── Split by athlete (no leakage) ─────────────────────────────────────
     train_ids, val_ids = athlete_split(df, val_frac=args.val_frac, seed=args.seed)
@@ -101,7 +149,15 @@ def train(args):
                 .sort_values(["athlete_id", "date"]).reset_index(drop=True))
     del df
 
-    train_ds = CyclingDataset(train_df, seq_len=args.seq_len, already_sorted=True)
+    # getattr defaults so hand-built arg objects (e.g. the Kaggle notebook's
+    # argparse.Namespace) keep working even if they predate these flags.
+    _ow  = not getattr(args, "no_outcome_weighting", False)
+    _osc = getattr(args, "outcome_scale", 0.05)
+    _odb = getattr(args, "outcome_deadband", 0.0)
+    train_ds = CyclingDataset(
+        train_df, seq_len=args.seq_len, already_sorted=True,
+        outcome_weighting=_ow, outcome_scale=_osc, outcome_deadband=_odb,
+    )
 
     # Compute inverse-frequency class weights for workout-type CE loss.
     # Without this, the model collapses to predicting "endurance" (~35% of
@@ -124,7 +180,10 @@ def train(args):
     print(f"Workout class weights (mean-norm): {dict(zip(_WT, [round(w, 2) for w in _wt_class_w]))}")
 
     del train_df
-    val_ds   = CyclingDataset(val_df, seq_len=args.seq_len, already_sorted=True)
+    val_ds   = CyclingDataset(
+        val_df, seq_len=args.seq_len, already_sorted=True,
+        outcome_weighting=_ow, outcome_scale=_osc, outcome_deadband=_odb,
+    )
     del val_df
     print(f"Train sequences: {len(train_ds):,}  Val sequences: {len(val_ds):,}")
 
@@ -241,10 +300,20 @@ def train(args):
             scheduler.step()
     _amp_device = device.type if device.type in ("cuda", "cpu") else "cpu"
     scaler     = GradScaler(device=_amp_device, enabled=device.type == "cuda" and not args.no_amp)
+    _wt_class_w_t = torch.tensor(_wt_class_w, dtype=torch.float32, device=device)
     ce_loss       = nn.CrossEntropyLoss(
         label_smoothing=0.1,
-        weight=torch.tensor(_wt_class_w, dtype=torch.float32, device=device),
+        weight=_wt_class_w_t,
     )
+    # Per-sample (unreduced) variants for outcome-weighted POLICY losses.
+    # We reduce manually so each sample can be scaled by its `policy_weight`
+    # (1.0 for synthetic/expert, outcome-advantage for real). With all weights
+    # 1.0 these reproduce the original reduced losses EXACTLY (see _pol_* below),
+    # so pure-synthetic pre-training is unchanged.
+    ce_loss_none  = nn.CrossEntropyLoss(
+        label_smoothing=0.1, weight=_wt_class_w_t, reduction="none",
+    )
+    mse_none      = nn.MSELoss(reduction="none")
     mse_loss      = nn.MSELoss()
     # delta=0.05: transition from L2→L1 at 5% — appropriate for fractional targets
     huber_loss    = nn.HuberLoss(delta=0.05)
@@ -255,6 +324,23 @@ def train(args):
     # toward the minority over/under classes since 'neither' dominates.
     ce_risk_ot = nn.CrossEntropyLoss(weight=torch.tensor([1.0, 1.0, 0.5], device=device))
     bce_risk_inj = nn.BCEWithLogitsLoss()
+
+    def _pol_losses(out, tgt_wt, tgt_if, tgt_dur, pw):
+        """Outcome-weighted policy losses (workout-type, intensity, duration).
+
+        Each sample's contribution is scaled by `pw` ∈ [0,1] — its imitation
+        weight. Synthetic samples carry pw=1.0 so the reductions below collapse
+        to the original class-weighted-mean / mean losses; real samples are
+        down-weighted toward 0 when the rider did not actually improve, so the
+        model never learns to copy losing prescriptions.
+        """
+        cw = _wt_class_w_t[tgt_wt]                              # (B,) class weight per target
+        wt_num = (ce_loss_none(out["workout_logits"], tgt_wt) * pw).sum()
+        loss_wt = wt_num / (cw * pw).sum().clamp_min(1e-6)
+        pw_den  = pw.sum().clamp_min(1e-6)
+        loss_if  = (mse_none(out["intensity"].squeeze(-1), tgt_if)  * pw).sum() / pw_den
+        loss_dur = (mse_none(out["duration"].squeeze(-1), tgt_dur) * pw).sum() / pw_den
+        return loss_wt, loss_if, loss_dur
 
     use_amp = device.type == "cuda" and not args.no_amp
     if use_amp:
@@ -277,6 +363,7 @@ def train(args):
         model.train()
         train_loss = 0.0
         n_train_batches = 0
+        pw_sum = 0.0   # running mean of policy (imitation) weight — diagnostic
 
         for batch in train_loader:
             if steps_per_epoch and n_train_batches >= steps_per_epoch:
@@ -299,6 +386,7 @@ def train(args):
             tgt_goal = batch["goal_idx"].to(device)
             tgt_rot  = batch["target_risk_ot"].to(device)
             tgt_rinj = batch["target_risk_inj"].to(device)
+            pw       = batch["policy_weight"].to(device)
 
             # Per-sample goal weights: (B, 3) → columns [w_ftp, w_pc5, w_pc1]
             gw = goal_w_table[tgt_goal]   # (B, 3)
@@ -307,9 +395,10 @@ def train(args):
             with autocast(device_type=_amp_device, enabled=use_amp):
                 out = model(x, di, pm, horizon_query=hq)
 
-                loss_wt  = ce_loss(out["workout_logits"], tgt_wt)
-                loss_if  = mse_loss(out["intensity"].squeeze(-1), tgt_if)
-                loss_dur = mse_loss(out["duration"].squeeze(-1), tgt_dur)
+                # POLICY heads (what to prescribe): outcome-weighted imitation.
+                loss_wt, loss_if, loss_dur = _pol_losses(out, tgt_wt, tgt_if, tgt_dur, pw)
+                # FORECAST heads (what the body does): train on ALL data, never
+                # outcome-weighted — declines are needed negative examples.
                 loss_rot  = ce_risk_ot(out["risk_ot_logits"], tgt_rot)
                 loss_rinj = bce_risk_inj(out["risk_inj_logit"].squeeze(-1), tgt_rinj)
 
@@ -347,6 +436,7 @@ def train(args):
             scaler.update()
 
             train_loss += loss.item()
+            pw_sum += pw.mean().item()
             n_train_batches += 1
 
             if n_train_batches % log_every == 0:
@@ -358,6 +448,7 @@ def train(args):
 
         scheduler.step()
         avg_train = train_loss / max(1, n_train_batches)
+        avg_pw    = pw_sum / max(1, n_train_batches)  # ~1.0 pure synthetic; <1.0 once real data is weighted in
 
         # ── Validation ────────────────────────────────────────────────────
         model.eval()
@@ -393,9 +484,11 @@ def train(args):
                 tgt_goal = batch["goal_idx"].to(device)
                 tgt_rot  = batch["target_risk_ot"].to(device)
                 tgt_rinj = batch["target_risk_inj"].to(device)
+                pw       = batch["policy_weight"].to(device)
 
                 gw = goal_w_table[tgt_goal]
                 out = model(x, di, pm, horizon_query=hq)
+                loss_wt_v, loss_if_v, loss_dur_v = _pol_losses(out, tgt_wt, tgt_if, tgt_dur, pw)
 
                 pred_ftp = out["ftp_delta"].squeeze(-1)
                 pred_pc5 = out["pc5min_delta"].squeeze(-1)
@@ -409,9 +502,9 @@ def train(args):
                 loss_pc1_v = _wloss(pred_pc1, tgt_pc1, valid_pc1, 2)
 
                 loss = (
-                    ce_loss(out["workout_logits"], tgt_wt)
-                    + 0.5  * mse_loss(out["intensity"].squeeze(-1), tgt_if)
-                    + 0.3  * mse_loss(out["duration"].squeeze(-1), tgt_dur)
+                    loss_wt_v
+                    + 0.5  * loss_if_v
+                    + 0.3  * loss_dur_v
                     + 0.10 * (loss_ftp_v + loss_pc5_v + loss_pc1_v)
                     + 0.10 * ce_risk_ot(out["risk_ot_logits"], tgt_rot)
                     + 0.05 * bce_risk_inj(out["risk_inj_logit"].squeeze(-1), tgt_rinj)
@@ -435,7 +528,8 @@ def train(args):
             f"Epoch {epoch:3d}/{args.epochs}  "
             f"train={avg_train:.4f}  val={avg_val:.4f}  "
             f"wt_acc={wt_acc:.1f}%  IF_MAE={if_mae:.3f}  "
-            f"FTPΔ_MAE={ftp_mae*100:.2f}%  lr={scheduler.get_last_lr()[0]:.2e}"
+            f"FTPΔ_MAE={ftp_mae*100:.2f}%  pol_w={avg_pw:.2f}  "
+            f"lr={scheduler.get_last_lr()[0]:.2e}"
         )
 
         if avg_val < best_val_loss:
@@ -557,5 +651,17 @@ if __name__ == "__main__":
                         help="Zero out workout_type one-hot (dims 32-42) and zone fractions "
                              "(dims 17-23) in the activity input. Use when fine-tuning on real "
                              "data where workout_type is inferred from IF/duration (circular).")
+    parser.add_argument("--no-outcome-weighting", action="store_true",
+                        help="Disable outcome-weighting of the policy heads. By default, REAL "
+                             "samples (source=real) only train the workout/intensity/duration "
+                             "heads in proportion to the rider's realized FTP gain — so the model "
+                             "imitates winners, not the amateur average. Synthetic data is "
+                             "unaffected (weight 1.0). Pass this to revert to plain imitation.")
+    parser.add_argument("--outcome-scale", type=float, default=0.05,
+                        help="Fractional 4-week FTP gain that earns full imitation weight (1.0) "
+                             "for real data. Default 0.05 = +5%%.")
+    parser.add_argument("--outcome-deadband", type=float, default=0.0,
+                        help="Minimum fractional FTP gain before a real sample gets any imitation "
+                             "weight. Default 0.0 (any improvement counts; flat/declining → 0).")
     args = parser.parse_args()
     train(args)

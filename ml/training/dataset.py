@@ -20,6 +20,16 @@ Targets per sample (predicting the NEXT activity):
   pc1min_delta   : fractional 1-min power capacity change over 4 weeks
   pc5min_delta   : fractional 5-min power capacity change over 4 weeks
   goal_idx       : integer goal class (0-7) for goal-weighted loss weighting
+  policy_weight  : how much to IMITATE this sample's prescription (wt/if/dur).
+                   1.0 for synthetic/expert data (always trust the coach).
+                   For REAL data it is an outcome-advantage in [0,1]: ~1.0 when
+                   the rider's FTP actually improved over the forecast window,
+                   ~0.0 when they stagnated or got worse. This is the key to
+                   "learn good-from-bad" — we only copy the prescriptions of
+                   riders who got faster, never the average/declining ones. The
+                   FORECAST heads (ftp/pc/risk) ignore this weight entirely and
+                   train on ALL data, good and bad — declines are the negative
+                   examples the physiology model needs.
   All fractional deltas are NaN when the capacity column is absent (old data).
 """
 from __future__ import annotations
@@ -73,6 +83,9 @@ class CyclingDataset(Dataset):
         athlete_ids: Iterable[int] | None = None,
         horizon_aware: bool = True,
         already_sorted: bool = False,
+        outcome_weighting: bool = True,
+        outcome_scale: float = 0.05,
+        outcome_deadband: float = 0.0,
     ):
         if athlete_ids is not None:
             df = df[df["athlete_id"].isin(set(athlete_ids))]
@@ -81,6 +94,25 @@ class CyclingDataset(Dataset):
             df = df.sort_values(["athlete_id", "date"]).reset_index(drop=True)
         self.seq_len = seq_len
         self.horizon_aware = horizon_aware
+        # Outcome-weighting controls for the POLICY heads on real data.
+        #   outcome_scale    : FTP gain (fractional) that earns full imitation
+        #                      weight 1.0. 0.05 ⇒ a +5% FTP gain over the 4-week
+        #                      forecast window is treated as a clear "winner".
+        #   outcome_deadband : minimum FTP gain before any imitation weight is
+        #                      given. 0.0 ⇒ any improvement counts; decliners → 0.
+        self.outcome_weighting = outcome_weighting
+        self.outcome_scale = max(outcome_scale, 1e-6)
+        self.outcome_deadband = outcome_deadband
+
+        # Per-row "is this real (logged) data?" flag. Synthetic/expert data has
+        # a trusted prescription policy → always imitated (weight 1.0). Real
+        # data is only imitated in proportion to the realized outcome. Source is
+        # taken from a `source` column ("real" vs anything else); absent column
+        # ⇒ treated as synthetic for backward compatibility with old parquets.
+        if "source" in df.columns:
+            self.is_real = (df["source"].astype(str).to_numpy() == "real")
+        else:
+            self.is_real = np.zeros(len(df), dtype=bool)
 
         # ── Pre-normalize the entire dataframe ────────────────────────────
         act_mat  = encode_activity_dataframe(df)   # (N, ACTIVITY_DIM) float32
@@ -285,6 +317,20 @@ class CyclingDataset(Dataset):
 
         goal_idx = int(self.goal_idx[history_last])
 
+        # ── Policy imitation weight ──────────────────────────────────────────
+        # Synthetic/expert prescriptions are always trusted (weight 1.0). Real
+        # prescriptions are weighted by the realized FTP outcome over the
+        # forecast window: a clear improver → ~1.0, flat/decliner → 0.0. This
+        # turns plain imitation (which would copy amateur mistakes) into
+        # advantage-weighted imitation (copy only what made riders faster).
+        # `ftp_delta` is always finite here — NaN-future samples are dropped at
+        # index-build time.
+        if self.outcome_weighting and bool(self.is_real[history_last]):
+            adv = (ftp_delta - self.outcome_deadband) / self.outcome_scale
+            policy_weight = float(min(max(adv, 0.0), 1.0))
+        else:
+            policy_weight = 1.0
+
         # Risk targets reflect the rider's state at the END of the history window.
         target_risk_ot  = int(self.risk_ot[history_last])
         target_risk_inj = float(self.risk_inj[history_last])
@@ -304,6 +350,7 @@ class CyclingDataset(Dataset):
             "pc1min_delta": torch.tensor(pc1min_delta, dtype=torch.float32),
             "pc5min_delta": torch.tensor(pc5min_delta, dtype=torch.float32),
             "goal_idx":     torch.tensor(goal_idx,     dtype=torch.long),
+            "policy_weight": torch.tensor(policy_weight, dtype=torch.float32),
             "target_risk_ot":  torch.tensor(target_risk_ot,  dtype=torch.long),
             "target_risk_inj": torch.tensor(target_risk_inj, dtype=torch.float32),
         }
@@ -326,6 +373,7 @@ def collate_fn(batch: list[dict]) -> dict:
     pc1min_delta = torch.full((B,), float("nan"), dtype=torch.float32)
     pc5min_delta = torch.full((B,), float("nan"), dtype=torch.float32)
     goal_idx     = torch.zeros(B, dtype=torch.long)
+    policy_weight = torch.ones(B, dtype=torch.float32)     # default: full trust
     risk_ot      = torch.full((B,), 2, dtype=torch.long)   # default "neither"
     risk_inj     = torch.zeros(B, dtype=torch.float32)
     has_horizon = "horizon_query" in batch[0]
@@ -345,6 +393,8 @@ def collate_fn(batch: list[dict]) -> dict:
         pc1min_delta[i] = item["pc1min_delta"]
         pc5min_delta[i] = item["pc5min_delta"]
         goal_idx[i]     = item["goal_idx"]
+        if "policy_weight" in item:
+            policy_weight[i] = item["policy_weight"]
         if "target_risk_ot" in item:
             risk_ot[i]  = item["target_risk_ot"]
         if "target_risk_inj" in item:
@@ -363,6 +413,7 @@ def collate_fn(batch: list[dict]) -> dict:
         "pc1min_delta": pc1min_delta,
         "pc5min_delta": pc5min_delta,
         "goal_idx":     goal_idx,
+        "policy_weight": policy_weight,
         "target_risk_ot":  risk_ot,
         "target_risk_inj": risk_inj,
     }

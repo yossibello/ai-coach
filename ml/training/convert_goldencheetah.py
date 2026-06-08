@@ -497,6 +497,9 @@ def convert_summary(input_dir: Path, output: Path, min_rides: int = 20) -> pd.Da
             rows.append({
                 "athlete_id":            str(aid_val),
                 "date":                  dates_arr[i],
+                # Real logged data — policy heads are outcome-weighted on this
+                # (imitate only riders who actually improved). See dataset.py.
+                "source":                "real",
                 # Activity — sanity caps: corrupt rows in GC CSV can have insane values
                 "duration_seconds":      min(float(g_dur[i]), 43200.0),   # cap 12h
                 "distance_meters":       min(float(g_dist[i]), 500000.0), # cap 500km
@@ -705,6 +708,7 @@ def convert_raw(input_dir: Path, output: Path, min_rides: int = 20) -> pd.DataFr
 
             rows.append({
                 "athlete_id": aid, "date": r["date"],
+                "source": "real",  # outcome-weighted policy training; see dataset.py
                 "duration_seconds": r["dur_s"], "distance_meters": r["dist_m"],
                 "elevation_gain_meters": r["elev_m"],
                 "avg_power": avg_p, "normalized_power": np_w,
