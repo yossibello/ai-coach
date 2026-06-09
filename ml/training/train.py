@@ -154,9 +154,11 @@ def train(args):
     _ow  = not getattr(args, "no_outcome_weighting", False)
     _osc = getattr(args, "outcome_scale", 0.05)
     _odb = getattr(args, "outcome_deadband", 0.0)
+    _sfw = getattr(args, "synthetic_forecast_weight", 1.0)
     train_ds = CyclingDataset(
         train_df, seq_len=args.seq_len, already_sorted=True,
         outcome_weighting=_ow, outcome_scale=_osc, outcome_deadband=_odb,
+        synthetic_forecast_weight=_sfw,
     )
 
     # Compute inverse-frequency class weights for workout-type CE loss.
@@ -183,6 +185,7 @@ def train(args):
     val_ds   = CyclingDataset(
         val_df, seq_len=args.seq_len, already_sorted=True,
         outcome_weighting=_ow, outcome_scale=_osc, outcome_deadband=_odb,
+        synthetic_forecast_weight=_sfw,
     )
     del val_df
     print(f"Train sequences: {len(train_ds):,}  Val sequences: {len(val_ds):,}")
@@ -387,6 +390,7 @@ def train(args):
             tgt_rot  = batch["target_risk_ot"].to(device)
             tgt_rinj = batch["target_risk_inj"].to(device)
             pw       = batch["policy_weight"].to(device)
+            fw       = batch["forecast_weight"].to(device)
 
             # Per-sample goal weights: (B, 3) → columns [w_ftp, w_pc5, w_pc1]
             gw = goal_w_table[tgt_goal]   # (B, 3)
@@ -412,9 +416,18 @@ def train(args):
                 valid_pc1 = ~tgt_pc1.isnan()
 
                 def _wloss(pred, tgt, valid, col):
+                    # Forecast loss weighted per-sample by `fw` (forecast_weight):
+                    # real rows = 1.0, synthetic rows = synthetic_forecast_weight
+                    # (0.0 in fine-tune → forecast learns from real rows ONLY).
+                    # Normalizing by fw.sum() means: when fw≡1 this is the plain
+                    # goal-weighted mean (pretrain unchanged); when synthetic
+                    # rows are 0 it becomes the mean over REAL rows only — same
+                    # magnitude as training on real data alone.
                     if not valid.any():
                         return torch.tensor(0.0, device=device)
-                    return (huber_none(pred[valid], tgt[valid]) * gw[valid, col]).mean()
+                    fwv = fw[valid]
+                    num = (huber_none(pred[valid], tgt[valid]) * gw[valid, col] * fwv).sum()
+                    return num / fwv.sum().clamp_min(1e-6)
 
                 loss_ftp = _wloss(pred_ftp, tgt_ftp, valid_ftp, 0)
                 loss_pc5 = _wloss(pred_pc5, tgt_pc5, valid_pc5, 1)
@@ -485,6 +498,7 @@ def train(args):
                 tgt_rot  = batch["target_risk_ot"].to(device)
                 tgt_rinj = batch["target_risk_inj"].to(device)
                 pw       = batch["policy_weight"].to(device)
+                fw       = batch["forecast_weight"].to(device)
 
                 gw = goal_w_table[tgt_goal]
                 out = model(x, di, pm, horizon_query=hq)
@@ -663,5 +677,12 @@ if __name__ == "__main__":
     parser.add_argument("--outcome-deadband", type=float, default=0.0,
                         help="Minimum fractional FTP gain before a real sample gets any imitation "
                              "weight. Default 0.0 (any improvement counts; flat/declining → 0).")
+    parser.add_argument("--synthetic-forecast-weight", type=float, default=1.0,
+                        help="Weight of SYNTHETIC rows in the forecast (FTP/power-curve delta) "
+                             "losses. 1.0 for pure-synthetic pretrain (default). Set 0.0 when "
+                             "fine-tuning with real data so the forecast heads learn physiology "
+                             "from MEASURED outcomes only — synthetic deltas are simulated and "
+                             "would otherwise wash out the real dose-response. Policy heads still "
+                             "use the synthetic replay regardless (that's what protects coaching).")
     args = parser.parse_args()
     train(args)

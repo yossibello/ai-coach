@@ -86,6 +86,7 @@ class CyclingDataset(Dataset):
         outcome_weighting: bool = True,
         outcome_scale: float = 0.05,
         outcome_deadband: float = 0.0,
+        synthetic_forecast_weight: float = 1.0,
     ):
         if athlete_ids is not None:
             df = df[df["athlete_id"].isin(set(athlete_ids))]
@@ -103,6 +104,13 @@ class CyclingDataset(Dataset):
         self.outcome_weighting = outcome_weighting
         self.outcome_scale = max(outcome_scale, 1e-6)
         self.outcome_deadband = outcome_deadband
+        # FORECAST heads (FTP/power-curve deltas) learn from MEASURED outcomes.
+        # Synthetic deltas are simulated (a formula), so during fine-tuning they
+        # must be excluded or they re-teach fictional physiology and wash out the
+        # real dose-response. synthetic_forecast_weight=1.0 during pure-synthetic
+        # PRETRAIN (it's all we have); set to 0.0 when fine-tuning with real data
+        # present so the forecast heads train on real rows only.
+        self.synthetic_forecast_weight = synthetic_forecast_weight
 
         # Per-row "is this real (logged) data?" flag. Synthetic/expert data has
         # a trusted prescription policy → always imitated (weight 1.0). Real
@@ -325,11 +333,17 @@ class CyclingDataset(Dataset):
         # advantage-weighted imitation (copy only what made riders faster).
         # `ftp_delta` is always finite here — NaN-future samples are dropped at
         # index-build time.
-        if self.outcome_weighting and bool(self.is_real[history_last]):
+        is_real = bool(self.is_real[history_last])
+        if self.outcome_weighting and is_real:
             adv = (ftp_delta - self.outcome_deadband) / self.outcome_scale
             policy_weight = float(min(max(adv, 0.0), 1.0))
         else:
             policy_weight = 1.0
+
+        # Forecast imitation weight: real rows = 1.0; synthetic rows controlled
+        # by synthetic_forecast_weight (1.0 pretrain, 0.0 fine-tune). Keeps the
+        # forecast heads learning physiology from measured data only.
+        forecast_weight = 1.0 if is_real else self.synthetic_forecast_weight
 
         # Risk targets reflect the rider's state at the END of the history window.
         target_risk_ot  = int(self.risk_ot[history_last])
@@ -351,6 +365,7 @@ class CyclingDataset(Dataset):
             "pc5min_delta": torch.tensor(pc5min_delta, dtype=torch.float32),
             "goal_idx":     torch.tensor(goal_idx,     dtype=torch.long),
             "policy_weight": torch.tensor(policy_weight, dtype=torch.float32),
+            "forecast_weight": torch.tensor(forecast_weight, dtype=torch.float32),
             "target_risk_ot":  torch.tensor(target_risk_ot,  dtype=torch.long),
             "target_risk_inj": torch.tensor(target_risk_inj, dtype=torch.float32),
         }
@@ -374,6 +389,7 @@ def collate_fn(batch: list[dict]) -> dict:
     pc5min_delta = torch.full((B,), float("nan"), dtype=torch.float32)
     goal_idx     = torch.zeros(B, dtype=torch.long)
     policy_weight = torch.ones(B, dtype=torch.float32)     # default: full trust
+    forecast_weight = torch.ones(B, dtype=torch.float32)   # default: full
     risk_ot      = torch.full((B,), 2, dtype=torch.long)   # default "neither"
     risk_inj     = torch.zeros(B, dtype=torch.float32)
     has_horizon = "horizon_query" in batch[0]
@@ -395,6 +411,8 @@ def collate_fn(batch: list[dict]) -> dict:
         goal_idx[i]     = item["goal_idx"]
         if "policy_weight" in item:
             policy_weight[i] = item["policy_weight"]
+        if "forecast_weight" in item:
+            forecast_weight[i] = item["forecast_weight"]
         if "target_risk_ot" in item:
             risk_ot[i]  = item["target_risk_ot"]
         if "target_risk_inj" in item:
@@ -414,6 +432,7 @@ def collate_fn(batch: list[dict]) -> dict:
         "pc5min_delta": pc5min_delta,
         "goal_idx":     goal_idx,
         "policy_weight": policy_weight,
+        "forecast_weight": forecast_weight,
         "target_risk_ot":  risk_ot,
         "target_risk_inj": risk_inj,
     }
