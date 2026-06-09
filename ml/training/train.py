@@ -254,10 +254,10 @@ def train(args):
                 sd = {"_orig_mod." + k: v for k, v in sd.items()}
             model.load_state_dict(sd)
             saved_epoch = ckpt.get("metrics", {}).get("epoch", 0)
-            # Resume only if mid-run (saved_epoch < total epochs).
-            # If saved_epoch >= args.epochs it's a fine-tune: use weights only,
-            # reset epoch counter so the loop and scheduler start fresh.
-            if saved_epoch < args.epochs:
+            # reset_optimizer=True  → fresh fine-tune (weights only, epoch=0, new LR)
+            # reset_optimizer=False → resume interrupted run (restore optimizer + epoch)
+            _reset = getattr(args, "reset_optimizer", False)
+            if not _reset and saved_epoch < args.epochs:
                 start_epoch = saved_epoch
                 _resume_optimizer_state = ckpt.get("optimizer_state")
                 print(f"Resuming from checkpoint: {args.checkpoint} (epoch {start_epoch} → {args.epochs})")
