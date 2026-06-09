@@ -16,6 +16,8 @@ Run from repo root:
 """
 import sys, os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "backend"))
+# Kaggle doesn't have asyncpg — set a dummy URL so database.py doesn't crash on import
+os.environ.setdefault("DATABASE_URL", "sqlite+aiosqlite:///tmp/dummy.db")
 
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
