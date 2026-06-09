@@ -15,6 +15,7 @@ from app.models.activity import Activity
 from app.models.tracking import PerformanceTest
 from app.services.file_parser import parse_activity_file
 from app.services.metrics_service import compute_activity_metrics, _score_and_tag, detect_ftp_test
+from app.services.recommendation_linking import latest_recommendation_id
 
 router = APIRouter()
 
@@ -207,6 +208,9 @@ async def upload_activity(
     activity = Activity(user_id=current_user.id, **parsed)
     compute_activity_metrics(activity, current_user)
     _score_and_tag(activity, current_user)
+    activity.recommendation_id = await latest_recommendation_id(
+        current_user.id, activity.date, db
+    )
     db.add(activity)
     await db.flush()
 

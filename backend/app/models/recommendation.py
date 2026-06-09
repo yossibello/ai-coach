@@ -26,6 +26,9 @@ class Recommendation(Base):
     payload: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
 
     user: Mapped["User"] = relationship("User")
+    activities: Mapped[list["Activity"]] = relationship(
+        "Activity", foreign_keys="Activity.recommendation_id", back_populates="recommendation"
+    )
 
 
 class FitnessMetric(Base):

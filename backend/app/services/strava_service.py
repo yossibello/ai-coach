@@ -10,6 +10,7 @@ import aiohttp
 from app.core.config import settings
 from app.models.user import User
 from app.models.activity import Activity
+from app.services.recommendation_linking import latest_recommendation_id
 
 STRAVA_AUTH_URL  = "https://www.strava.com/oauth/authorize"
 STRAVA_TOKEN_URL = "https://www.strava.com/oauth/token"
@@ -270,6 +271,9 @@ async def sync_strava_history(
                 activity = _strava_to_activity(sa, user.id, pc_curve)
                 compute_activity_metrics(activity, user)
                 _score_and_tag(activity, user)
+                activity.recommendation_id = await latest_recommendation_id(
+                    user.id, activity.date, db
+                )
                 db.add(activity)
                 inserted += 1
 

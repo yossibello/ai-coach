@@ -36,6 +36,7 @@ from app.models.user import User
 from app.models.activity import Activity
 from app.models.health import HealthMetric
 from app.services.metrics_service import compute_activity_metrics
+from app.services.recommendation_linking import latest_recommendation_id
 
 log = logging.getLogger(__name__)
 
@@ -410,6 +411,9 @@ async def sync_garmin(
 
             act = Activity(user_id=user.id, **kw)
             compute_activity_metrics(act, user)
+            act.recommendation_id = await latest_recommendation_id(
+                user.id, act.date, db
+            )
             db.add(act)
             stats["activities_added"] += 1
 

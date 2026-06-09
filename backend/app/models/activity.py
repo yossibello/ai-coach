@@ -58,6 +58,11 @@ class Activity(Base):
     time_in_zones: Mapped[dict | None] = mapped_column(JSON, nullable=True)
 
     workout_type: Mapped[str | None] = mapped_column(String(30), nullable=True)
+    # FK to the recommendation that preceded this ride (nullable — not every ride has one)
+    recommendation_id: Mapped[str | None] = mapped_column(
+        UUID(as_uuid=False), ForeignKey("recommendations.id", ondelete="SET NULL"),
+        nullable=True, index=True
+    )
     perceived_exertion: Mapped[int | None] = mapped_column(Integer, nullable=True)
     notes: Mapped[str | None] = mapped_column(Text, nullable=True)
 
@@ -83,3 +88,6 @@ class Activity(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     user: Mapped["User"] = relationship("User", back_populates="activities")
+    recommendation: Mapped["Recommendation | None"] = relationship(
+        "Recommendation", foreign_keys=[recommendation_id], back_populates="activities"
+    )
