@@ -155,10 +155,11 @@ def train(args):
     _osc = getattr(args, "outcome_scale", 0.05)
     _odb = getattr(args, "outcome_deadband", 0.0)
     _sfw = getattr(args, "synthetic_forecast_weight", 1.0)
+    _fmd = getattr(args, "forecast_min_delta", 1e-4)
     train_ds = CyclingDataset(
         train_df, seq_len=args.seq_len, already_sorted=True,
         outcome_weighting=_ow, outcome_scale=_osc, outcome_deadband=_odb,
-        synthetic_forecast_weight=_sfw,
+        synthetic_forecast_weight=_sfw, forecast_min_delta=_fmd,
     )
 
     # Compute inverse-frequency class weights for workout-type CE loss.
@@ -185,7 +186,7 @@ def train(args):
     val_ds   = CyclingDataset(
         val_df, seq_len=args.seq_len, already_sorted=True,
         outcome_weighting=_ow, outcome_scale=_osc, outcome_deadband=_odb,
-        synthetic_forecast_weight=_sfw,
+        synthetic_forecast_weight=_sfw, forecast_min_delta=_fmd,
     )
     del val_df
     print(f"Train sequences: {len(train_ds):,}  Val sequences: {len(val_ds):,}")

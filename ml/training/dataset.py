@@ -87,6 +87,7 @@ class CyclingDataset(Dataset):
         outcome_scale: float = 0.05,
         outcome_deadband: float = 0.0,
         synthetic_forecast_weight: float = 1.0,
+        forecast_min_delta: float = 1e-4,
     ):
         if athlete_ids is not None:
             df = df[df["athlete_id"].isin(set(athlete_ids))]
@@ -111,6 +112,10 @@ class CyclingDataset(Dataset):
         # PRETRAIN (it's all we have); set to 0.0 when fine-tuning with real data
         # present so the forecast heads train on real rows only.
         self.synthetic_forecast_weight = synthetic_forecast_weight
+        # Minimum absolute ftp_delta for a REAL row to contribute to forecast loss.
+        # Excludes the ~47% of GC sequences where FTP never changed (athlete didn't
+        # test) — those would teach the model "training has no effect on FTP".
+        self.forecast_min_delta = forecast_min_delta
 
         # Per-row "is this real (logged) data?" flag. Synthetic/expert data has
         # a trusted prescription policy → always imitated (weight 1.0). Real
@@ -343,7 +348,11 @@ class CyclingDataset(Dataset):
         # Forecast imitation weight: real rows = 1.0; synthetic rows controlled
         # by synthetic_forecast_weight (1.0 pretrain, 0.0 fine-tune). Keeps the
         # forecast heads learning physiology from measured data only.
+        # Additionally, real rows where FTP didn't actually change (athlete never
+        # tested in this window) are excluded — they'd teach "training = no effect".
         forecast_weight = 1.0 if is_real else self.synthetic_forecast_weight
+        if is_real and abs(ftp_delta) < self.forecast_min_delta:
+            forecast_weight = 0.0
 
         # Risk targets reflect the rider's state at the END of the history window.
         target_risk_ot  = int(self.risk_ot[history_last])
