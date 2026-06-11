@@ -250,6 +250,50 @@ EVENTS: list[dict] = [
         "type": "flat_speed",
     },
 
+    # ── Norwegian classics ───────────────────────────────────────────────────
+    {
+        "id": "birkebeinerrittet",
+        "name": "Birkebeinerrittet",
+        "category": "gravel",
+        "icon": "🪵",
+        "description": "88km MTB from Rena to Lillehammer, 1,000m climbing through Norwegian forest. Named after the medieval Birkebeiner warriors.",
+        "distance_km": 88, "elevation_m": 1000,
+        "tiers": [
+            {"label": "gold",   "emoji": "🥇", "name": "Sub 3h30",       "min_wkg": 3.8, "min_ctl": 65, "max_time_h": 3.5},
+            {"label": "silver", "emoji": "🥈", "name": "Sub 5h",         "min_wkg": 2.9, "min_ctl": 48, "max_time_h": 5.0},
+            {"label": "bronze", "emoji": "🥉", "name": "Finisher <7h",   "min_wkg": 2.2, "min_ctl": 34, "max_time_h": 7.0},
+        ],
+        "type": "climb",
+    },
+    {
+        "id": "nordsjorittet",
+        "name": "Nordsjørittet",
+        "category": "gran_fondo",
+        "icon": "🌊",
+        "description": "130km along the Norwegian North Sea coast. Wind is the enemy — flat roads, Atlantic headwinds.",
+        "distance_km": 130, "elevation_m": 700,
+        "tiers": [
+            {"label": "gold",   "emoji": "🥇", "name": "Sub 4h (~32 km/h)", "min_flat_kmh": 33, "min_ctl": 58, "max_time_h": 4.0},
+            {"label": "silver", "emoji": "🥈", "name": "Sub 5h30",          "min_flat_kmh": 24, "min_ctl": 40, "max_time_h": 5.5},
+            {"label": "bronze", "emoji": "🥉", "name": "Finisher <8h",      "min_flat_kmh": 16, "min_ctl": 25, "max_time_h": 8.0},
+        ],
+        "type": "flat_speed",
+    },
+    {
+        "id": "styrkeproven",
+        "name": "Styrkeprøven",
+        "category": "ultra",
+        "icon": "🏔️",
+        "description": "540km Oslo to Bergen — one of the world's oldest cycling events. Cross the entire width of Norway over Hardangervidda plateau.",
+        "distance_km": 540, "elevation_m": 5800,
+        "tiers": [
+            {"label": "gold",   "emoji": "🥇", "name": "Sub 20h",       "min_wkg": 3.5, "min_ctl": 85, "max_time_h": 20.0},
+            {"label": "silver", "emoji": "🥈", "name": "Sub 28h",       "min_wkg": 2.8, "min_ctl": 65, "max_time_h": 28.0},
+            {"label": "bronze", "emoji": "🥉", "name": "Finisher <40h", "min_wkg": 2.2, "min_ctl": 48, "max_time_h": 40.0},
+        ],
+        "type": "ultra_endurance",
+    },
+
     # ── Ultra distance ────────────────────────────────────────────────────────
     {
         "id": "paris_brest_paris",
