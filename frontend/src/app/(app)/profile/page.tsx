@@ -152,7 +152,16 @@ export default function ProfilePage() {
         <Row label="Primary Goal">
           <select
             value={form.primary_goal ?? ""}
-            onChange={(e) => set("primary_goal", e.target.value as GoalType)}
+            onChange={(e) => {
+              const val = e.target.value as GoalType;
+              const isEventGoal = val === "event_specific" || val?.includes("gran") || val === "climbing" || val === "criterium" || val === "triathlon";
+              if (!isEventGoal) {
+                set("goal_event_name", "");
+                set("goal_event_date", "");
+                set("event_type", undefined);
+              }
+              set("primary_goal", val);
+            }}
             className="input-field"
           >
             <option value="">Select goal</option>
