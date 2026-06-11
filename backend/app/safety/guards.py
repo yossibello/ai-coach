@@ -151,6 +151,17 @@ def apply_workout_safety(
         wtype = "sweetspot"
         target_tss = min(target_tss, 120)
 
+    # 2b. Cap endurance/long_ride duration if moderately fatigued.
+    # Heavy aerobic days after accumulated load still carry physiological cost —
+    # 145min z2 when TSB=-20 adds stress without providing recovery.
+    if HARD_RECOVERY_TSB < tsb < MEDIUM_FATIGUE_TSB and wtype in ("endurance", "long_ride", "easy"):
+        if duration > 90:
+            notes.append(
+                f"Shortened {wtype}: TSB {round(tsb)} — kept aerobic session short to allow recovery."
+            )
+            duration = 90
+            target_tss = min(target_tss, 75)
+
     # 3. Hard duration cap
     if duration > MAX_SINGLE_SESSION_MINUTES:
         notes.append(
