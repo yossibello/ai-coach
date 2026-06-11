@@ -383,6 +383,38 @@ async def generate_recommendation(user: User, db: AsyncSession) -> Recommendatio
         safe_next["target_tss"] = min(safe_next.get("target_tss", 80), 50)
         next_notes.append(f"Downgraded to easy: {_consec} consecutive training days detected.")
 
+    # ── Yesterday big-day guard ──────────────────────────────────────────────
+    # PMC ATL is a 7-day EMA — a single 130 TSS day only bumps ATL by ~18 points,
+    # leaving TSB nearly neutral the next day. But if yesterday's TSS was several
+    # multiples of CTL, the body hasn't had time to absorb the load yet.
+    # Cap today's recommendation proportionally rather than waiting for TSB to lag.
+    _yesterday = datetime.utcnow().date() - timedelta(days=1)
+    _yesterday_tss = sum(
+        (a.tss or 0) for a in activities
+        if a.date and _naive(a.date).date() == _yesterday
+    )
+    if ctl > 5 and _yesterday_tss > 0 and safe_next:
+        _ratio = _yesterday_tss / ctl
+        _wtype = safe_next.get("workout_type", "endurance")
+        if _ratio >= 3.0 and _wtype not in ("recovery",):
+            # e.g. CTL=28, yesterday=130 TSS → ratio=4.6 → force easy
+            safe_next = dict(safe_next)
+            safe_next["workout_type"] = "easy"
+            safe_next["duration_minutes"] = min(safe_next.get("duration_minutes", 90), 60)
+            safe_next["target_tss"] = min(safe_next.get("target_tss", 80), 45)
+            next_notes.append(
+                f"Eased back: yesterday was {int(_yesterday_tss)} TSS ({_ratio:.1f}× your fitness baseline) — "
+                f"today is recovery stimulus, not adaptation."
+            )
+        elif _ratio >= 2.0 and _wtype in ("endurance", "long_ride"):
+            # e.g. CTL=50, yesterday=120 TSS → ratio=2.4 → shorten endurance
+            safe_next = dict(safe_next)
+            safe_next["duration_minutes"] = min(safe_next.get("duration_minutes", 145), 90)
+            safe_next["target_tss"] = min(safe_next.get("target_tss", 120), 70)
+            next_notes.append(
+                f"Shortened endurance: yesterday was {int(_yesterday_tss)} TSS ({_ratio:.1f}× fitness baseline)."
+            )
+
     payload["next_workout"] = safe_next
 
     # ── Already-rode-today guard ────────────────────────────────────────────
