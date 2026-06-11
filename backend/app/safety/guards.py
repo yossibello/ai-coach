@@ -162,7 +162,17 @@ def apply_workout_safety(
             duration = 90
             target_tss = min(target_tss, 75)
 
-    # 3. Hard duration cap
+    # 3. Per-type duration ceiling (model can output absurd durations for easy types)
+    TYPE_DURATION_CEILING = {
+        "recovery": 60,
+        "easy":     120,
+    }
+    type_dur_ceiling = TYPE_DURATION_CEILING.get(wtype)
+    if type_dur_ceiling and duration > type_dur_ceiling:
+        notes.append(f"Capped {wtype} duration: {int(duration)} min → {type_dur_ceiling} min.")
+        duration = type_dur_ceiling
+
+    # 4. Hard duration cap
     if duration > MAX_SINGLE_SESSION_MINUTES:
         notes.append(
             f"Capped duration: {int(duration)} min → {MAX_SINGLE_SESSION_MINUTES} min."

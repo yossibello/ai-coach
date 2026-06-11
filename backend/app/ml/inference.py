@@ -396,10 +396,13 @@ async def generate_recommendation(user: User, db: AsyncSession) -> Recommendatio
     if ctl > 5 and _yesterday_tss > 0 and safe_next:
         _ratio = _yesterday_tss / ctl
         _wtype = safe_next.get("workout_type", "endurance")
-        if _ratio >= 3.0 and _wtype not in ("recovery",):
-            # e.g. CTL=28, yesterday=130 TSS → ratio=4.6 → force easy
+        if _ratio >= 3.0:
+            # e.g. CTL=28, yesterday=84 TSS → ratio=3.0 → force easy/short
+            # Don't skip recovery type — model may already say recovery but with
+            # a bogus duration (192 min recovery). Cap duration regardless.
             safe_next = dict(safe_next)
-            safe_next["workout_type"] = "easy"
+            if _wtype not in ("recovery",):
+                safe_next["workout_type"] = "easy"
             safe_next["duration_minutes"] = min(safe_next.get("duration_minutes", 90), 60)
             safe_next["target_tss"] = min(safe_next.get("target_tss", 80), 45)
             next_notes.append(
