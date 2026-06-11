@@ -27,6 +27,8 @@ STATEMENTS = [
     "ALTER TABLE activities ADD COLUMN IF NOT EXISTS is_outlier      BOOLEAN     NOT NULL DEFAULT FALSE",
     "CREATE INDEX IF NOT EXISTS ix_activities_quality_score ON activities(quality_score)",
     "CREATE INDEX IF NOT EXISTS ix_activities_review_status ON activities(review_status)",
+    "ALTER TABLE activities ADD COLUMN IF NOT EXISTS recommendation_id UUID REFERENCES recommendations(id) ON DELETE SET NULL",
+    "CREATE INDEX IF NOT EXISTS ix_activities_recommendation_id ON activities(recommendation_id)",
     # Users ───────────────────────────────────────────────────────────────────
     "ALTER TABLE users ADD COLUMN IF NOT EXISTS allow_for_training BOOLEAN     NOT NULL DEFAULT TRUE",
     "ALTER TABLE users ADD COLUMN IF NOT EXISTS model_version      VARCHAR(50)",    # Athlete profile nutrition context ──────────────────────────────────────────────
