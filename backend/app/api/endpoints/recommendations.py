@@ -70,6 +70,11 @@ async def get_recommendation(
             if rec and rec.payload.get("risks"):
                 rec = None  # force regeneration
 
+            # Bust cache if payload lacks multi-horizon structure — generated
+            # before the horizons feature was added or after a schema change.
+            if rec and "horizons" not in rec.payload:
+                rec = None
+
             if rec:
                 return _rec_out(rec)
 
