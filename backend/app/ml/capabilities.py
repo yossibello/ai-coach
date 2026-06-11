@@ -192,6 +192,64 @@ EVENTS: list[dict] = [
         "type": "climb",
     },
 
+    # ── Swedish classics ─────────────────────────────────────────────────────
+    {
+        "id": "vatternrundan",
+        "name": "Vätternrundan",
+        "category": "gran_fondo",
+        "icon": "🇸🇪",
+        "description": "315km around Lake Vättern. World's largest cycling event. Flat but relentless — the distance breaks you, not the hills.",
+        "distance_km": 315, "elevation_m": 1800,
+        "tiers": [
+            {"label": "gold",   "emoji": "🥇", "name": "Sub 10h (~31 km/h)", "min_flat_kmh": 32, "min_ctl": 72, "max_time_h": 10.0},
+            {"label": "silver", "emoji": "🥈", "name": "Sub 13h (~24 km/h)", "min_flat_kmh": 25, "min_ctl": 52, "max_time_h": 13.0},
+            {"label": "bronze", "emoji": "🥉", "name": "Finisher <18h",      "min_flat_kmh": 18, "min_ctl": 35, "max_time_h": 18.0},
+        ],
+        "type": "flat_speed",
+    },
+    {
+        "id": "halvvattern",
+        "name": "Halvvättern",
+        "category": "gran_fondo",
+        "icon": "🏅",
+        "description": "150km around southern Lake Vättern. The classic gateway to Vätternrundan — same roads, half the suffering.",
+        "distance_km": 150, "elevation_m": 900,
+        "tiers": [
+            {"label": "gold",   "emoji": "🥇", "name": "Sub 5h (~30 km/h)", "min_flat_kmh": 31, "min_ctl": 58, "max_time_h": 5.0},
+            {"label": "silver", "emoji": "🥈", "name": "Sub 7h (~21 km/h)", "min_flat_kmh": 22, "min_ctl": 40, "max_time_h": 7.0},
+            {"label": "bronze", "emoji": "🥉", "name": "Finisher <10h",     "min_flat_kmh": 15, "min_ctl": 25, "max_time_h": 10.0},
+        ],
+        "type": "flat_speed",
+    },
+    {
+        "id": "cykelvasan",
+        "name": "Cykelvasan",
+        "category": "gravel",
+        "icon": "🌲",
+        "description": "90km gravel through Dalarna forests — same trail as the legendary Vasaloppet ski race. Sälen to Mora.",
+        "distance_km": 90, "elevation_m": 560,
+        "tiers": [
+            {"label": "gold",   "emoji": "🥇", "name": "Sub 3h",          "min_wkg": 3.9, "min_ctl": 68, "max_time_h": 3.0},
+            {"label": "silver", "emoji": "🥈", "name": "Sub 4h",          "min_wkg": 3.0, "min_ctl": 50, "max_time_h": 4.0},
+            {"label": "bronze", "emoji": "🥉", "name": "Finisher <5h30",  "min_wkg": 2.3, "min_ctl": 36, "max_time_h": 5.5},
+        ],
+        "type": "climb",
+    },
+    {
+        "id": "tjejvattern",
+        "name": "Tjejvättern",
+        "category": "gran_fondo",
+        "icon": "💜",
+        "description": "100km around Lake Vättern. Scandinavia's biggest women's cycling event — open to all, celebrated by all.",
+        "distance_km": 100, "elevation_m": 600,
+        "tiers": [
+            {"label": "gold",   "emoji": "🥇", "name": "Sub 3h15 (~31 km/h)", "min_flat_kmh": 32, "min_ctl": 52, "max_time_h": 3.25},
+            {"label": "silver", "emoji": "🥈", "name": "Sub 4h30 (~22 km/h)", "min_flat_kmh": 23, "min_ctl": 35, "max_time_h": 4.5},
+            {"label": "bronze", "emoji": "🥉", "name": "Finisher <6h",        "min_flat_kmh": 17, "min_ctl": 22, "max_time_h": 6.0},
+        ],
+        "type": "flat_speed",
+    },
+
     # ── Ultra distance ────────────────────────────────────────────────────────
     {
         "id": "paris_brest_paris",
