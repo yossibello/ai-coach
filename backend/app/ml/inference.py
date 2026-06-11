@@ -356,6 +356,33 @@ async def generate_recommendation(user: User, db: AsyncSession) -> Recommendatio
         drift_pct=drift_assessment.drift_pct,
     )
     next_notes = next_notes + health_notes + drift_notes
+
+    # ── Consecutive-days rest guard ──────────────────────────────────────────
+    # Count how many consecutive days the athlete rode BEFORE today.
+    # Friel: rest after 3 straight days for most athletes; 4+ is overreach
+    # territory regardless of TSB. The safety guard's TSB threshold (-30) is
+    # too conservative to catch accumulated fatigue from pure endurance blocks.
+    _check = datetime.utcnow().date() - timedelta(days=1)
+    _consec = 0
+    for _ in range(14):
+        if any(_naive(a.date).date() == _check for a in activities if a.date):
+            _consec += 1
+            _check -= timedelta(days=1)
+        else:
+            break
+    if _consec >= 4 and safe_next and safe_next.get("workout_type") not in ("recovery",):
+        safe_next = dict(safe_next)
+        safe_next["workout_type"] = "recovery"
+        safe_next["duration_minutes"] = min(safe_next.get("duration_minutes", 60), 45)
+        safe_next["target_tss"] = min(safe_next.get("target_tss", 50), 30)
+        next_notes.append(f"Forced recovery: {_consec} consecutive training days — rest is training too.")
+    elif _consec == 3 and safe_next and safe_next.get("workout_type") not in ("recovery", "easy"):
+        safe_next = dict(safe_next)
+        safe_next["workout_type"] = "easy"
+        safe_next["duration_minutes"] = min(safe_next.get("duration_minutes", 90), 60)
+        safe_next["target_tss"] = min(safe_next.get("target_tss", 80), 50)
+        next_notes.append(f"Downgraded to easy: {_consec} consecutive training days detected.")
+
     payload["next_workout"] = safe_next
 
     # ── Already-rode-today guard ────────────────────────────────────────────
