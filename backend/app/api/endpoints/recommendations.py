@@ -168,16 +168,18 @@ async def get_macrocycle(
         training_days = (profile.training_days_per_week or 5) if profile else 5
         ftp         = (profile.ftp or 250.0) if profile else 250.0
     else:
-        if not profile or not profile.goal_event_date:
-            from fastapi import HTTPException
-            raise HTTPException(
-                404, "No goal event set. Set goal_event_date in profile to use macrocycle planning."
-            )
-        virtual_event_date = profile.goal_event_date
-        event_type  = profile.event_type
-        event_name  = profile.goal_event_name
-        training_days = profile.training_days_per_week or 5
-        ftp         = profile.ftp or 250.0
+        if profile and profile.goal_event_date:
+            virtual_event_date = profile.goal_event_date
+            event_type  = profile.event_type
+            event_name  = profile.goal_event_name
+        else:
+            # No event set — show a rolling 90-day horizon so the macrocycle
+            # section stays visible for FTP-improvement / general fitness goals.
+            virtual_event_date = today + timedelta(days=90)
+            event_type  = None
+            event_name  = "90-day plan"
+        training_days = (profile.training_days_per_week or 5) if profile else 5
+        ftp         = (profile.ftp or 250.0) if profile else 250.0
 
     metric_result = await db.execute(
         select(FitnessMetric)
